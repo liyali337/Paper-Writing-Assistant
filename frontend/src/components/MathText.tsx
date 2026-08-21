@@ -8,31 +8,63 @@ type Piece =
 
 export function MathText({ text }: { text: string }) {
   const pieces = splitMath(text);
+  const blocks: Piece[][] = [];
+  let current: Piece[] = [];
+  for (const piece of pieces) {
+    if (piece.type === "display") {
+      if (current.length) {
+        blocks.push(current);
+        current = [];
+      }
+      blocks.push([piece]);
+    } else {
+      current.push(piece);
+    }
+  }
+  if (current.length) blocks.push(current);
+
   return (
     <>
-      {pieces.map((piece, index) => {
-        if (piece.type === "text") {
-          return piece.value ? <span key={index}>{piece.value}</span> : null;
+      {blocks.map((block, index) => {
+        const first = block[0];
+        if (block.length === 1 && first.type === "display") {
+          return <RenderedMath key={index} value={first.value} display />;
         }
-        try {
-          const html = katex.renderToString(piece.value, {
-            displayMode: piece.type === "display",
-            throwOnError: false,
-            output: "html",
-          });
-          return (
-            <span
-              key={index}
-              className={piece.type === "display" ? "math-display" : "math-inline"}
-              dangerouslySetInnerHTML={{ __html: html }}
-            />
-          );
-        } catch {
-          return <span key={index}>{piece.value}</span>;
-        }
+        const hasCopy = block.some((piece) => piece.value.trim());
+        if (!hasCopy) return null;
+        return (
+          <p key={index}>
+            {block.map((piece, pieceIndex) =>
+              piece.type === "text" ? (
+                piece.value ? <span key={pieceIndex}>{piece.value}</span> : null
+              ) : (
+                <RenderedMath key={pieceIndex} value={piece.value} />
+              ),
+            )}
+          </p>
+        );
       })}
     </>
   );
+}
+
+function RenderedMath({ value, display = false }: { value: string; display?: boolean }) {
+  try {
+    const html = katex.renderToString(value, {
+      displayMode: display,
+      throwOnError: false,
+      output: "html",
+    });
+    const Tag = display ? "div" : "span";
+    return (
+      <Tag
+        className={display ? "math-display" : "math-inline"}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  } catch {
+    return display ? <div className="math-display">{value}</div> : <span>{value}</span>;
+  }
 }
 
 export function splitMath(text: string): Piece[] {

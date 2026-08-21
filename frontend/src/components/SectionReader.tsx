@@ -143,7 +143,7 @@ function SectionBody({
             </figure>
           );
         }
-        return <p key={`p-${index}`}><MathText text={block.text} /></p>;
+        return <MathText key={`p-${index}`} text={block.text} />;
       })}
     </div>
   );

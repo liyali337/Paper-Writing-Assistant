@@ -591,11 +591,24 @@ button {
   display: block;
   margin: 10px 0 14px;
   overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
   text-align: center;
+  scrollbar-width: none;
+}
+
+.math-display::-webkit-scrollbar {
+  display: none;
 }
 
 .math-display .katex-display {
   margin: 0;
+  overflow: visible;
+}
+
+.math-display .katex-display > .katex {
+  max-width: 100%;
+  white-space: normal;
 }
 
 .md-table-wrap {
