@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Asta 七大功能</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: #ece7df;
+      color: #161412;
+      font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .sheet {
+      width: 720px;
+      height: 960px;
+      background: #fffdf8;
+      padding: 56px 52px 48px;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transform-origin: center center;
+    }
+
+    header {
+      padding-bottom: 28px;
+      border-bottom: 2px solid #161412;
+    }
+
+    .kicker {
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      color: #9a3412;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      font-size: 40px;
+      font-weight: 650;
+      line-height: 1.15;
+      letter-spacing: 0.02em;
+    }
+
+    .sub {
+      margin-top: 10px;
+      font-size: 15px;
+      color: #6b645c;
+      line-height: 1.4;
+    }
+
+    .list {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 8px 0 12px;
+    }
+
+    article {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      column-gap: 8px;
+      padding: 14px 0;
+      border-bottom: 1px solid #e6e0d6;
+    }
+
+    article:last-child { border-bottom: none; }
+
+    .num {
+      font-size: 15px;
+      font-weight: 650;
+      color: #9a3412;
+      letter-spacing: 0.04em;
+      padding-top: 3px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .name {
+      font-size: 20px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+
+    .api {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 2px 8px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #5c564e;
+      background: #f3eee6;
+      border-radius: 4px;
+    }
+
+    .desc {
+      margin-top: 8px;
+      font-size: 14px;
+      line-height: 1.55;
+      color: #4a453e;
+    }
+
+    footer {
+      padding-top: 20px;
+      border-top: 2px solid #161412;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 12px;
+      color: #6b645c;
+      line-height: 1.4;
+    }
+
+    footer b {
+      color: #161412;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <header>
+      <div class="kicker">AI2 · SEMANTIC SCHOLAR</div>
+      <h1>Asta 七大功能</h1>
+      <p class="sub">官方学术 MCP，用来检索论文、引用、作者与正文证据</p>
+    </header>
+
+    <section class="list">
+      <article>
+        <div class="num">01</div>
+        <div>
+          <div class="name">关键词检索</div>
+          <span class="api">search_papers_by_relevance</span>
+          <p class="desc">按主题词搜论文，可过滤年份、会议和期刊。</p>
+        </div>
+      </article>
+      <article>
+        <div class="num">02</div>
+        <div>
+          <div class="name">标题查找</div>
+          <span class="api">search_paper_by_title</span>
+          <p class="desc">用论文标题精确命中，避免相近题目混在一起。</p>
+        </div>
+      </article>
+      <article>
+        <div class="num">03</div>
+        <div>
+          <div class="name">论文详情</div>
+          <span class="api">get_paper</span>
+          <p class="desc">用 DOI、arXiv、PMID 取摘要、作者与开放获取信息。</p>
+        </div>
+      </article>
+      <article>
+        <div class="num">04</div>
+        <div>
+          <div class="name">引用追踪</div>
+          <span class="api">get_citations</span>
+          <p class="desc">查看谁引用了这篇论文，可按发表日期收窄。</p>
+        </div>
+      </article>
+      <article>
+        <div class="num">05</div>
+        <div>
+          <div class="name">作者检索</div>
+          <span class="api">search_authors_by_name</span>
+          <p class="desc">按姓名找研究者，可看机构、论文数和 h 指数。</p>
+        </div>
+      </article>
+      <article>
+        <div class="num">06</div>
+        <div>
+          <div class="name">作者论文</div>
+          <span class="api">get_author_papers</span>
+          <p class="desc">列出某位作者的论文，可按时间过滤。</p>
+        </div>
+      </article>
+      <article>
+        <div class="num">07</div>
+        <div>
+          <div class="name">正文片段</div>
+          <span class="api">snippet_search</span>
+          <p class="desc">从论文正文取出约 500 词相关片段，用来核对证据。</p>
+        </div>
+      </article>
+    </section>
+
+    <footer>
+      <b>asta-tools.allen.ai/mcp/v1</b>
+      <span>免费申请 Key · 需主动查询</span>
+    </footer>
+  </main>
+
+  <script>
+    const sheet = document.querySelector(".sheet");
+    const W = 720;
+    const H = 960;
+    function fit() {
+      const scale = Math.min(window.innerWidth / W, window.innerHeight / H) * 0.92;
+      sheet.style.transform = "scale(" + scale + ")";
+    }
+    fit();
+    window.addEventListener("resize", fit);
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "paper-writing-assistant",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev -w paper-understanding-web",
+    "dev:api": ".venv/bin/dl-agent-api"
+  }
+}
