@@ -145,6 +145,8 @@ class KnowledgeService:
         paper.language = parsed.language
         paper.intro_status = "skipped"
         paper.method_status = "skipped"
+        paper.translate_status = "pending"
+        self.store.delete_translation(paper_id)
 
         chars = parsed.char_count
         per_page = chars / parsed.page_count if parsed.page_count else 0

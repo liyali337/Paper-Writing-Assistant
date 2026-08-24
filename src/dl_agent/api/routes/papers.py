@@ -1,10 +1,12 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
 
-from dl_agent.api.deps import get_knowledge
+from dl_agent.api.deps import get_knowledge, get_translate
 from dl_agent.api.errors import api_error, not_implemented
+from dl_agent.harness.complete import LlmNotConfiguredError
 from dl_agent.knowledge.pdf_io import InvalidPdfError
 from dl_agent.knowledge.service import KnowledgeService, PaperNotFoundError
+from dl_agent.translate.service import TranslateService
 
 router = APIRouter(tags=["papers"])
 
@@ -117,3 +119,46 @@ def get_method(paper_id: str):
 def refresh_method(paper_id: str, refresh: bool = Query(default=False)):
     _ = (paper_id, refresh)
     raise not_implemented("method", _M2)
+
+
+@router.get("/papers/{paper_id}/translations")
+def get_translations(
+    paper_id: str,
+    svc: KnowledgeService = Depends(get_knowledge),
+    translate: TranslateService = Depends(get_translate),
+):
+    try:
+        svc.get_paper(paper_id)
+    except PaperNotFoundError:
+        raise api_error(404, "not_found", "translations", "论文不存在") from None
+    cached = translate.get_translation(paper_id)
+    if cached is None:
+        raise api_error(404, "not_found", "translations", "尚未开始翻译")
+    if cached.status == "pending":
+        raise api_error(202, "pending", "translations", "翻译进行中")
+    return cached
+
+
+@router.post("/papers/{paper_id}/translations")
+def start_translations(
+    paper_id: str,
+    background: BackgroundTasks,
+    refresh: bool = Query(default=False),
+    svc: KnowledgeService = Depends(get_knowledge),
+    translate: TranslateService = Depends(get_translate),
+):
+    try:
+        paper = svc.get_paper(paper_id)
+    except PaperNotFoundError:
+        raise api_error(404, "not_found", "translations", "论文不存在") from None
+    if paper.status != "ready":
+        raise api_error(409, "not_ready", "translations", "论文尚未解析完成")
+    try:
+        cached, should_run = translate.start_translation(paper_id, refresh=refresh)
+    except LlmNotConfiguredError as exc:
+        raise api_error(503, "llm_not_configured", "translations", str(exc)) from exc
+    if should_run:
+        background.add_task(translate.finish_translation, paper_id)
+    if cached.status == "pending":
+        raise api_error(202, "pending", "translations", "翻译进行中")
+    return cached

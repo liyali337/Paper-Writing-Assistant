@@ -1,62 +1,201 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PDFWorker, getDocument, type PDFDocumentProxy, type RenderTask } from "pdfjs-dist";
 import PdfJsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
 
-import type { Section } from "../api/types";
+import { ensureTranslations, formatApiError } from "../api/client";
+import type { Figure, Section, SectionTranslation } from "../api/types";
+import { demoTranslations } from "../data/demo";
 import { DemoDiagram } from "./DemoDiagram";
 import { Chevron } from "./icons";
+import { SectionReader, type LangMode } from "./SectionReader";
+
+export type SourceView = "pdf" | "sections";
 
 type Props = {
+  view: SourceView;
+  onView: (view: SourceView) => void;
   pdfUrl: string | null;
   sections: Section[];
+  figures: Figure[];
+  paperId: string | null;
+  paperTitle: string | null;
+  preview: boolean;
+  focusSection: string | null;
   page: number;
   pageCount: number;
   onPage: (page: number) => void;
+  onOpenFigure: (figure: Figure) => void;
   onPageCount?: (count: number) => void;
 };
 
-export function PdfPane({ pdfUrl, sections, page, pageCount, onPage, onPageCount }: Props) {
+export function PdfPane({
+  view,
+  onView,
+  pdfUrl,
+  sections,
+  figures,
+  paperId,
+  paperTitle,
+  preview,
+  focusSection,
+  page,
+  pageCount,
+  onPage,
+  onOpenFigure,
+  onPageCount,
+}: Props) {
   const safeCount = Math.max(pageCount, 1);
+  const [showEn, setShowEn] = useState(true);
+  const [showZh, setShowZh] = useState(true);
+  const [translations, setTranslations] = useState<Map<string, SectionTranslation>>(new Map());
+  const [translating, setTranslating] = useState(false);
+  const [translateError, setTranslateError] = useState<string | null>(null);
+
+  const lang = useMemo<LangMode>(() => ({ showEn, showZh }), [showEn, showZh]);
+
+  const toggleEn = useCallback(() => {
+    setShowEn((current) => {
+      if (current && !showZh) return current;
+      return !current;
+    });
+  }, [showZh]);
+
+  const toggleZh = useCallback(() => {
+    setShowZh((current) => {
+      if (current && !showEn) return current;
+      return !current;
+    });
+  }, [showEn]);
+
+  useEffect(() => {
+    if (!showZh) {
+      setTranslating(false);
+      return;
+    }
+    if (preview) {
+      setTranslations(new Map(demoTranslations.map((item) => [item.section_id, item])));
+      setTranslateError(null);
+      setTranslating(false);
+      return;
+    }
+    if (!paperId || sections.length === 0) return;
+
+    let cancelled = false;
+    setTranslating(true);
+    setTranslateError(null);
+    ensureTranslations(paperId)
+      .then((payload) => {
+        if (cancelled) return;
+        setTranslations(new Map(payload.sections.map((item) => [item.section_id, item])));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setTranslateError(formatApiError(error));
+      })
+      .finally(() => {
+        if (!cancelled) setTranslating(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [paperId, preview, sections.length, showZh]);
 
   return (
     <section className="pane pdf-pane">
       <div className="pdf-toolbar">
-        <span>原文</span>
-        <span className="grow" />
-        <div className="page-nav">
-          <button
-            className="icon-btn"
-            type="button"
-            aria-label="上一页"
-            disabled={page <= 1}
-            onClick={() => onPage(page - 1)}
-          >
-            <Chevron dir="left" />
+        <div className="tabs source-tabs">
+          <button className={view === "pdf" ? "is-on" : ""} type="button" onClick={() => onView("pdf")}>
+            原PDF
           </button>
-          <input
-            aria-label="页码"
-            value={page}
-            onChange={(event) => {
-              const next = Number(event.target.value);
-              if (Number.isFinite(next)) onPage(next);
-            }}
-          />
-          <span style={{ color: "var(--faint)", fontSize: 12 }}>/ {safeCount}</span>
           <button
-            className="icon-btn"
+            className={view === "sections" ? "is-on" : ""}
             type="button"
-            aria-label="下一页"
-            disabled={page >= safeCount}
-            onClick={() => onPage(page + 1)}
+            onClick={() => onView("sections")}
           >
-            <Chevron dir="right" />
+            章节原文
           </button>
         </div>
+        {view === "sections" ? (
+          <div className="lang-toggles">
+            <button
+              className={showEn ? "is-on" : ""}
+              type="button"
+              aria-pressed={showEn}
+              onClick={toggleEn}
+            >
+              英文
+            </button>
+            <button
+              className={showZh ? "is-on" : ""}
+              type="button"
+              aria-pressed={showZh}
+              onClick={toggleZh}
+            >
+              中文
+            </button>
+            {translating ? <span className="lang-status">翻译中…</span> : null}
+          </div>
+        ) : null}
+        <span className="grow" />
+        {view === "pdf" ? (
+          <div className="page-nav">
+            <button
+              className="icon-btn"
+              type="button"
+              aria-label="上一页"
+              disabled={page <= 1}
+              onClick={() => onPage(page - 1)}
+            >
+              <Chevron dir="left" />
+            </button>
+            <input
+              aria-label="页码"
+              value={page}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                if (Number.isFinite(next)) onPage(next);
+              }}
+            />
+            <span style={{ color: "var(--faint)", fontSize: 12 }}>/ {safeCount}</span>
+            <button
+              className="icon-btn"
+              type="button"
+              aria-label="下一页"
+              disabled={page >= safeCount}
+              onClick={() => onPage(page + 1)}
+            >
+              <Chevron dir="right" />
+            </button>
+          </div>
+        ) : null}
       </div>
-      {pdfUrl ? (
-        <PdfPages pdfUrl={pdfUrl} page={page} onPage={onPage} onPageCount={onPageCount} />
+      {view === "pdf" ? (
+        pdfUrl ? (
+          <PdfPages pdfUrl={pdfUrl} page={page} onPage={onPage} onPageCount={onPageCount} />
+        ) : (
+          <PaperMock sections={sections} page={page} />
+        )
       ) : (
-        <PaperMock sections={sections} page={page} />
+        <div className="source-scroll">
+          <SectionReader
+            sections={sections}
+            figures={figures}
+            paperId={paperId}
+            preview={preview}
+            paperTitle={paperTitle}
+            focusId={focusSection}
+            lang={lang}
+            translations={translations}
+            translating={translating}
+            translateError={translateError}
+            onJump={(nextPage) => {
+              onPage(nextPage);
+              onView("pdf");
+            }}
+            onOpenFigure={onOpenFigure}
+          />
+        </div>
       )}
     </section>
   );
@@ -150,13 +289,13 @@ function PdfPages({
   }, [doc, onPage]);
 
   if (nativeSrc) {
-    return <iframe className="pdf-frame" title="PDF 原文" src={nativeSrc} />;
+    return <iframe className="pdf-frame" title="原 PDF" src={nativeSrc} />;
   }
 
   if (!doc) {
     return (
       <div className="pdf-scroll">
-        <div className="pdf-page is-loading">正在打开原文…</div>
+        <div className="pdf-page is-loading">正在打开 PDF…</div>
       </div>
     );
   }
@@ -183,22 +322,26 @@ function PdfPageCanvas({ doc, pageNumber }: { doc: PDFDocumentProxy; pageNumber:
     let renderTask: RenderTask | null = null;
 
     const draw = async () => {
-      const width = Math.max(240, wrap.clientWidth - 32);
+      const width = Math.max(240, wrap.clientWidth);
       if (Math.abs(width - lastWidth) < 2 && canvas.height) return;
       lastWidth = width;
       const pdfPage = await doc.getPage(pageNumber);
       if (cancelled) return;
       renderTask?.cancel();
       const base = pdfPage.getViewport({ scale: 1 });
+      const scale = width / base.width;
+      const viewport = pdfPage.getViewport({ scale });
       const dpr = window.devicePixelRatio || 1;
-      const viewport = pdfPage.getViewport({ scale: (width / base.width) * dpr });
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      canvas.style.width = `${viewport.width / dpr}px`;
-      canvas.style.height = `${viewport.height / dpr}px`;
-      const context = canvas.getContext("2d");
-      if (!context) return;
-      renderTask = pdfPage.render({ canvas, canvasContext: context, viewport });
+      canvas.width = Math.floor(viewport.width * dpr);
+      canvas.height = Math.floor(viewport.height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${Math.floor(viewport.height)}px`;
+      renderTask = pdfPage.render({
+        canvas,
+        viewport,
+        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
+        background: "#ffffff",
+      });
       try {
         await renderTask.promise;
       } catch {
@@ -239,7 +382,7 @@ function PaperMock({ sections, page }: { sections: Section[]; page: number }) {
     return (
       <div className="paper-scroll">
         <div className="empty" style={{ textAlign: "center", paddingTop: 48 }}>
-          <h3>原文预览</h3>
+          <h3>PDF 预览</h3>
           <p>上传 PDF 后将在此打开。界面预览会用排版稿代替真实文件。</p>
         </div>
       </div>

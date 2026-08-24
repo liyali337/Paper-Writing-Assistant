@@ -19,7 +19,7 @@ import { demoFigures, demoIntro, demoMethod, demoPaper, demoSections } from "../
 import { Lightbox } from "./FigureViews";
 import { IntroPanel } from "./IntroPanel";
 import { Outline } from "./Outline";
-import { PdfPane } from "./PdfPane";
+import { PdfPane, type SourceView } from "./PdfPane";
 import { LogoMark, RefreshIcon, TreeIcon } from "./icons";
 import { MethodPanel } from "./MethodPanel";
 
@@ -40,6 +40,7 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
   const [analysisW, setAnalysisW] = useState("42%");
   const [dragging, setDragging] = useState(false);
   const [tab, setTab] = useState<Tab>("intro");
+  const [sourceView, setSourceView] = useState<SourceView>("sections");
   const [page, setPage] = useState(1);
   const [paperId, setPaperId] = useState<string | null>(preview ? "demo" : null);
   const [paper, setPaper] = useState<Paper | null>(preview ? demoPaper : null);
@@ -156,12 +157,28 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
     1,
   );
 
-  const jump = useCallback(
-    (next: number, sectionId?: string) => {
+  const syncPage = useCallback(
+    (next: number) => {
       setPage(Math.min(pageCount, Math.max(1, next)));
-      if (sectionId) setFocusSection(sectionId);
     },
     [pageCount],
+  );
+
+  const jumpToPage = useCallback(
+    (next: number) => {
+      syncPage(next);
+      setSourceView("pdf");
+    },
+    [syncPage],
+  );
+
+  const jumpToSection = useCallback(
+    (next: number, sectionId: string) => {
+      syncPage(next);
+      setFocusSection(sectionId);
+      setSourceView("sections");
+    },
+    [syncPage],
   );
 
   const onPageCount = useCallback((count: number) => {
@@ -169,13 +186,13 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
   }, []);
 
   useEffect(() => {
-    if (!focusSection) return;
+    if (!focusSection || sourceView !== "sections") return;
     const node = document.getElementById(`sec-${focusSection}`);
-    const scroller = node?.closest(".analysis-body");
+    const scroller = node?.closest(".source-scroll");
     if (!node || !(scroller instanceof HTMLElement)) return;
     const top = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 12;
     scroller.scrollTo({ top, behavior: "smooth" });
-  }, [focusSection, tab]);
+  }, [focusSection, sourceView]);
 
   async function onReparse() {
     if (preview || !paperId) return;
@@ -206,6 +223,8 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
     !preview &&
     !notice &&
     (uploading || !paper || paper.status === "queued" || paper.status === "parsing");
+
+  const paperTitle = paper?.title || file?.name || paper?.filename || null;
 
   return (
     <div className="app-shell">
@@ -246,15 +265,25 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
           <Outline
             sections={sections}
             activePage={page}
-            onJump={jump}
+            onJump={(page, sectionId) => {
+              if (sectionId) jumpToSection(page, sectionId);
+            }}
           />
         </aside>
         <PdfPane
+          view={sourceView}
+          onView={setSourceView}
           pdfUrl={preview ? null : paperId ? sourcePdfUrl(paperId) : objectUrl.current}
           sections={sections}
+          figures={figures}
+          paperId={preview ? "demo" : paperId}
+          paperTitle={paperTitle}
+          preview={preview}
+          focusSection={focusSection}
           page={page}
           pageCount={pageCount}
-          onPage={jump}
+          onPage={syncPage}
+          onOpenFigure={setLightbox}
           onPageCount={onPageCount}
         />
         <div
@@ -313,7 +342,7 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
                 <div className="skel" style={{ width: "60%", marginTop: 18 }} />
               </div>
             ) : null}
-            {intro || method || (!waiting && !notice) ? (
+            {intro || method || sections.length || (!waiting && !notice) ? (
               tab === "intro" ? (
               <IntroPanel
                 intro={intro}
@@ -321,12 +350,11 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
                 figures={figures}
                 paperId={preview ? "demo" : paperId}
                 preview={preview}
-                onJump={jump}
+                onJump={jumpToPage}
                 onOpenFigure={setLightbox}
-                focusSectionId={focusSection}
                 onJumpSectionTitle={(title) => {
                   const hit = sections.find((section) => section.title === title);
-                  if (hit) jump(hit.page_start, hit.section_id);
+                  if (hit) jumpToSection(hit.page_start, hit.section_id);
                 }}
               />
               ) : (
@@ -337,7 +365,7 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
                 paperId={preview ? "demo" : paperId}
                 preview={preview}
                 focusSectionId={focusSection}
-                onJump={jump}
+                onJump={jumpToPage}
                 onOpenFigure={setLightbox}
               />
               )

@@ -97,6 +97,7 @@ def strip_page_chrome(text: str) -> str:
     cleaned = _CORRESPONDING.sub(" ", text)
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r" *\n *", "\n", cleaned)
+    cleaned = re.sub(r"([A-Za-z]{2,})-\n+([a-z]{2,})", _join_hyphen_break, cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"([^\s.!?])\n\n+([a-z])", r"\1 \2", cleaned)
     paragraphs = [
@@ -105,6 +106,16 @@ def strip_page_chrome(text: str) -> str:
         if part.strip() and not is_page_chrome(part)
     ]
     return "\n\n".join(paragraphs).strip()
+
+
+_HYPHEN_KEEP = {"of", "the", "and", "or", "to", "in", "on", "for", "at", "by"}
+
+
+def _join_hyphen_break(match: re.Match[str]) -> str:
+    left, right = match.group(1), match.group(2)
+    if right in _HYPHEN_KEEP:
+        return f"{left}-{right}"
+    return f"{left}{right}"
 
 
 _NUMBERED_HEADING = re.compile(

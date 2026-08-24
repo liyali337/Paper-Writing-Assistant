@@ -273,7 +273,7 @@ def test_formula_is_inlined_in_section_text() -> None:
     section = result.sections[0]
     assert [figure.kind for figure in result.figures] == ["formula"]
     assert "<!--fig:fig-001-->" in section.text
-    assert "Here, x_m denotes the CLS token." in section.text
+    assert "Here, $x_m$ denotes the CLS token." in section.text
     assert r"\mathcal{L} = \ell_{ce} + \ell_{tri}" in section.text
     assert section.figure_ids == ["fig-001"]
 
@@ -315,14 +315,15 @@ def test_tidy_math_prose_repairs_broken_inline_symbols() -> None:
         "with α ∈ [0 , 1] and m ∈ { R,N,T } ."
     )
     out = tidy_math_prose(raw)
-    assert "x_m^c" in out
-    assert "x_m^p" in out
+    assert "$x_m^c$" in out
+    assert "$x_m^p" in out
     assert "x_m^1" in out
-    assert "x̂_m" in out or "x\u0302_m" in out
+    assert r"$\hat{x}_m$" in out or r"$\hat{x}_{m}$" in out
     assert "\\protect" not in out
-    assert "|x_m^i - x_f^i|" in out
-    assert "[0, 1]" in out
-    assert "{R,N,T}" in out
+    assert "$x_m^i$" in out or r"$|x_m^i - x_f^i|$" in out
+    assert "$x_f^i$" in out or r"$|x_m^i - x_f^i|$" in out
+    assert "[0, 1]" in out or "[0,1]" in out
+    assert "R,N,T" in out
 
 
 def test_corresponding_author_footnote_is_dropped_and_sentence_stitched() -> None:
@@ -351,3 +352,49 @@ def test_corresponding_author_footnote_is_dropped_and_sentence_stitched() -> Non
     )
     assert "Corresponding author" not in stitched
     assert "core challenge." in stitched
+
+
+def test_list_items_keep_single_newlines() -> None:
+    items = [
+        LayoutItem(kind="heading", page=1, text="1. Introduction", level=1),
+        LayoutItem(kind="text", page=1, text="Our contributions are:"),
+        LayoutItem(kind="text", page=1, text="1. A hierarchical alignment objective."),
+        LayoutItem(kind="text", page=1, text="2. A region aggregator without extra boxes."),
+        LayoutItem(kind="text", page=1, text="The rest of the paper is organized as follows."),
+    ]
+    result = assemble("p1", items)
+    text = result.sections[0].text
+    assert "Our contributions are:\n\n1. A hierarchical" in text
+    assert "objective.\n2. A region" in text
+    assert "\n\n2. " not in text
+    assert "boxes.\n\nThe rest" in text
+
+
+def test_hyphenated_line_break_is_joined() -> None:
+    from dl_agent.knowledge.classify import strip_page_chrome
+
+    assert strip_page_chrome("visual repre-\n\nsentation alignment") == "visual representation alignment"
+    assert "state-of-the-art" in strip_page_chrome("a state-\n\nof-the-art backbone")
+    items = [
+        LayoutItem(kind="heading", page=1, text="1. Method", level=1),
+        LayoutItem(kind="text", page=1, text="We learn a visual repre-"),
+        LayoutItem(kind="text", page=1, text="sentation of each region."),
+    ]
+    result = assemble("p1", items)
+    assert "representation" in result.sections[0].text
+    assert "repre-" not in result.sections[0].text
+
+
+def test_reference_number_glues_to_entry() -> None:
+    items = [
+        LayoutItem(kind="heading", page=8, text="References", level=1),
+        LayoutItem(kind="text", page=8, text="1"),
+        LayoutItem(kind="text", page=8, text="A. Radford et al. Learning transferable visual models."),
+        LayoutItem(kind="text", page=8, text="[2]"),
+        LayoutItem(kind="text", page=8, text="C. Jia et al. Scaling up visual learning."),
+    ]
+    result = assemble("p1", items)
+    refs = next(section for section in result.sections if section.kind == "references")
+    assert "[1] A. Radford" in refs.text
+    assert "[2] C. Jia" in refs.text
+    assert "\n\n1\n\n" not in refs.text

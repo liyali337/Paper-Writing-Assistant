@@ -21,11 +21,16 @@ export function FigureCard({
   preview: boolean;
   onOpen: (figure: Figure) => void;
 }) {
-  const isFormula = figure.kind === "formula";
+  const cardClass =
+    figure.kind === "formula"
+      ? "formula-card"
+      : figure.kind === "algorithm"
+        ? "algorithm-card"
+        : "figure-card";
   return (
-    <figure className={isFormula ? "formula-card" : "figure-card"} onClick={() => onOpen(figure)}>
+    <figure className={cardClass} onClick={() => onOpen(figure)}>
       <FigureVisual figure={figure} paperId={paperId} preview={preview} />
-      {isFormula ? null : <figcaption>{figure.caption || figure.label}</figcaption>}
+      {figure.kind === "formula" ? null : <figcaption>{figure.caption || figure.label}</figcaption>}
     </figure>
   );
 }

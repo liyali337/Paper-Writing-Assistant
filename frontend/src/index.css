@@ -515,14 +515,96 @@ button {
   overflow: auto;
   overscroll-behavior: contain;
   background: #d8dde3;
-  padding: 16px 0 40px;
+  padding: 0 0 32px;
+}
+
+.source-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  padding: 24px 28px 80px;
+}
+
+.pdf-toolbar .source-tabs {
+  height: 100%;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.pdf-toolbar .source-tabs button {
+  display: flex;
+  align-items: center;
+}
+
+.lang-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+.lang-toggles button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.lang-toggles button.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.lang-status {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bilingual-block .text-zh {
+  margin-top: 0.35em;
+}
+
+.text-zh {
+  color: var(--muted);
+}
+
+.translate-hint {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.translate-hint.is-bad {
+  background: #fdecec;
+  color: #b42318;
 }
 
 .pdf-page {
-  margin: 0 auto 16px;
+  margin: 0 auto;
   width: min(100%, 920px);
   background: #fff;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+  overflow: hidden;
+  line-height: 0;
+}
+
+.pdf-page + .pdf-page {
+  border-top: 1px solid #c5cbd3;
 }
 
 .pdf-page canvas {
@@ -536,23 +618,47 @@ button {
   display: grid;
   place-items: center;
   color: var(--muted);
-  box-shadow: none;
   background: transparent;
+  line-height: 1.5;
+}
+
+.paper-read {
+  max-width: 46em;
 }
 
 .section-read {
-  margin: 0 0 28px;
-  padding-bottom: 20px;
+  margin: 0 0 32px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--line-2);
+}
+
+.section-read:last-of-type {
+  border-bottom: 0;
 }
 
 .section-read.is-focus {
   background: var(--accent-soft);
   margin-left: -12px;
   margin-right: -12px;
-  padding: 12px 12px 20px;
+  padding: 12px 12px 16px;
   border-radius: 10px;
   border-bottom: 0;
+}
+
+.section-read.is-abstract {
+  background: var(--line-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px 6px;
+  border-bottom: 0;
+}
+
+.section-read.level-2 {
+  margin-left: 8px;
+}
+
+.section-read.level-3 {
+  margin-left: 16px;
 }
 
 .section-read-head {
@@ -560,27 +666,129 @@ button {
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .section-read-head h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: 17px;
   letter-spacing: -0.02em;
   text-transform: none;
   color: var(--ink);
+  font-weight: 650;
+}
+
+.section-read.level-2 .section-read-head h3 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.section-read.level-3 .section-read-head h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-2);
 }
 
 .section-read-body {
   margin: 0;
   color: var(--ink-2);
-  line-height: 1.75;
-  font-size: 14.5px;
+  line-height: 1.8;
+  font-size: 15px;
 }
 
 .section-read-body p {
-  margin: 0 0 12px;
-  white-space: pre-wrap;
+  margin: 0 0 0.9em;
+  white-space: normal;
+}
+
+.section-read.is-refs .section-read-body p {
+  padding-left: 1.7em;
+  text-indent: -1.7em;
+  font-size: 13.5px;
+  line-height: 1.55;
+  margin-bottom: 0.55em;
+}
+
+.ref-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ref-list li {
+  display: grid;
+  grid-template-columns: 2.4em minmax(0, 1fr);
+  column-gap: 8px;
+  margin: 0 0 0.7em;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.ref-n {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  text-align: right;
+  padding-top: 1px;
+}
+
+.ref-body > span,
+.ref-body > p {
+  margin: 0;
+}
+
+.section-list {
+  margin: 0 0 1em;
+  padding-left: 1.3em;
+}
+
+.section-list li {
+  margin: 0.35em 0;
+}
+
+.section-list li > span,
+.section-list li > p {
+  margin: 0;
+}
+
+.cite-ref {
+  font-size: 0.72em;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0 0.12em;
+  letter-spacing: 0.01em;
+}
+
+.md-table .math-inline,
+.md-table-wrap figcaption .math-inline {
+  display: inline;
+}
+
+.algorithm-card {
+  margin: 12px 0 16px;
+  border: 1px solid var(--ink-2);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+.algorithm-card img,
+.algorithm-card svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: white;
+}
+
+.algorithm-card figcaption {
+  padding: 8px 12px 10px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--ink-2);
 }
 
 .math-inline {
@@ -782,20 +990,23 @@ button {
 
 .tabs {
   display: flex;
-  gap: 2px;
+  gap: 0;
   height: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .tabs button {
   border: 0;
   background: transparent;
   height: 100%;
-  padding: 0 12px;
+  padding: 0 10px;
   color: var(--muted);
   font-weight: 600;
   font-size: 13px;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
+  white-space: nowrap;
 }
 
 .tabs button.is-on {

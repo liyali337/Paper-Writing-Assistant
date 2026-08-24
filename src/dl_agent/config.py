@@ -1,10 +1,15 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DL_AGENT_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="DL_AGENT_",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     data_dir: Path = Path("./data")
     max_pdf_bytes: int = 50 * 1024 * 1024
@@ -15,6 +20,14 @@ class Settings(BaseSettings):
     min_chars_total: int = 800
     min_chars_per_page: int = 200
     clip_above_pt: float = 280
+    openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
+    openai_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai/",
+        validation_alias="OPENAI_BASE_URL",
+    )
+    model_name: str = Field(default="gemini-2.5-flash", validation_alias="MODEL_NAME")
+    translate_prompt_version: str = "translate-v1"
+    translate_section_delay_s: float = 6.5
 
 
 def get_settings() -> Settings:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from dl_agent.domain.models import Figure, Paper, Section
+from dl_agent.domain.models import Figure, Paper, PaperTranslation, Section
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -135,3 +135,21 @@ class FilePaperStore:
         with self._lock:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def save_translation(self, translation: PaperTranslation) -> None:
+        path = self._paper_dir(translation.paper_id, create=True) / "translations.json"
+        _atomic_write_text(path, translation.model_dump_json(indent=2))
+
+    def get_translation(self, paper_id: str) -> PaperTranslation | None:
+        path = self._paper_dir(paper_id) / "translations.json"
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+        try:
+            return PaperTranslation.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValidationError, json.JSONDecodeError):
+            return None
+
+    def delete_translation(self, paper_id: str) -> None:
+        path = self._paper_dir(paper_id) / "translations.json"
+        if path.exists():
+            path.unlink()

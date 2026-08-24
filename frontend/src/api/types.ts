@@ -31,6 +31,7 @@ export type Paper = {
   language: string;
   intro_status: ExplainStatus;
   method_status: ExplainStatus;
+  translate_status: ExplainStatus;
 };
 
 export type Section = {
@@ -119,6 +120,20 @@ export type Health = {
   status: string;
   service: string;
   version: string;
+};
+
+export type SectionTranslation = {
+  section_id: string;
+  title_zh: string;
+  text_zh: string;
+};
+
+export type PaperTranslation = {
+  paper_id: string;
+  status: ExplainStatus;
+  model: string;
+  prompt_version: string;
+  sections: SectionTranslation[];
 };
 
 export class HttpError extends Error {

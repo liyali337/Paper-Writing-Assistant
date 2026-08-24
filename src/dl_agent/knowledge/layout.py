@@ -86,17 +86,31 @@ def assemble(
 
     def append_text(text: str, page: int) -> None:
         chunk = text.strip()
-        if not chunk or is_page_chrome(chunk):
+        if not chunk:
             return
         section = current()
         if section is None:
             section = open_section("Front Matter", page, 1)
             section.kind = "other"
+        if is_page_chrome(chunk) and not (
+            section.kind == "references" and _is_ref_number(chunk)
+        ):
+            return
         if section.text.endswith(chunk) or (len(chunk) > 48 and chunk in section.text):
             section.page_end = max(section.page_end, page)
             return
+        if section.kind == "references" and _glue_ref_number(section, chunk, page):
+            return
         if section.text:
-            section.text += "\n\n" + chunk
+            prev_line = section.text.rsplit("\n\n", 1)[-1].split("\n")[-1]
+            if (
+                section.kind != "references"
+                and _is_list_item(chunk)
+                and _is_list_item(prev_line)
+            ):
+                section.text += "\n" + chunk
+            else:
+                section.text += "\n\n" + chunk
         else:
             section.text = chunk
         section.page_end = max(section.page_end, page)
@@ -268,6 +282,37 @@ def assemble(
     )
 
 
+_LIST_ITEM = re.compile(r"^(?:\(\d+\)|\d+\.(?!\d)|[-–•])\s+\S")
+_REF_NUMBER = re.compile(r"^[\[\(]?\d{1,3}[\]\).]?\s*$")
+
+
+def _is_list_item(text: str) -> bool:
+    return bool(_LIST_ITEM.match(text.strip()))
+
+
+def _is_ref_number(text: str) -> bool:
+    return bool(_REF_NUMBER.match(text.strip()))
+
+
+def _ref_mark(text: str) -> str:
+    digits = re.sub(r"\D", "", text.strip())
+    return f"[{digits}]" if digits else text.strip()
+
+
+def _glue_ref_number(section: Section, chunk: str, page: int) -> bool:
+    """PDF 常把 [1] 和条目正文拆成两块，粘回 [1] Author..."""
+    if not section.text or _is_ref_number(chunk):
+        return False
+    parts = section.text.rsplit("\n\n", 1)
+    prev = parts[-1].strip()
+    if not _is_ref_number(prev):
+        return False
+    head = f"{parts[0]}\n\n" if len(parts) == 2 else ""
+    section.text = f"{head}{_ref_mark(prev)} {chunk}".strip()
+    section.page_end = max(section.page_end, page)
+    return True
+
+
 def formula_marker(figure_id: str) -> str:
     return f"<!--fig:{figure_id}-->"
 
@@ -395,112 +440,247 @@ def polish_formulas(
 
 _TEX_JUNK = re.compile(r"\\(?:protect|big|Big|left|right|displaystyle)\s*")
 _HAT = re.compile(r"ˆ\s*([A-Za-z])(?:\s+([A-Za-z]))?")
+_SPACED_ACCENT = re.compile(r"([¨ˆ˜¯´˙`˚])\s+([A-Za-z])\s+([A-Za-z])\b")
+_ACCENT_BEFORE_MATH = re.compile(r"([¨ˆ˜¯´˙`˚])\s*\$([A-Za-z])([^$]*)\$")
+_COMBINING_ACCENT = re.compile(
+    r"(?<![A-Za-z])([A-Za-z])([\u0300\u0301\u0302\u0303\u0304\u0307\u0308\u030a])"
+    r"(?:_\{?([A-Za-z0-9]+)\}?)?(?![A-Za-z])"
+)
+_TEXT_UMLAUT = re.compile(r"(?<=[A-Za-z])\s*¨\s*([aouAOUe])(?=[A-Za-z])")
+_UMLAUT_LETTER = {
+    "a": "ä",
+    "o": "ö",
+    "u": "ü",
+    "e": "ë",
+    "A": "Ä",
+    "O": "Ö",
+    "U": "Ü",
+    "E": "Ë",
+}
+_ACCENT_CMD = {
+    "¨": "ddot",
+    "ˆ": "hat",
+    "˜": "tilde",
+    "¯": "bar",
+    "´": "acute",
+    "˙": "dot",
+    "`": "grave",
+    "˚": "mathring",
+    "\u0300": "grave",
+    "\u0301": "acute",
+    "\u0302": "hat",
+    "\u0303": "tilde",
+    "\u0304": "bar",
+    "\u0307": "dot",
+    "\u0308": "ddot",
+    "\u030a": "mathring",
+}
 _TRIPLE = re.compile(r"\b([A-Za-z])\s+([A-Za-z0-9]+)\s+([A-Za-z])\b")
+_NAMED_TRIPLE = re.compile(r"\b([A-Z][A-Za-z]{2,})\s+([A-Z])\s+([a-z])\b")
+_WS_SCRIPT = re.compile(r"(?<![A-Za-z\\])([WFTX])([SPRNIT])_\{?([A-Za-z0-9]+)\}?")
+_REAL_SPACE = re.compile(r"(?<![A-Za-z\\])R([A-Z])\s*(?:\\times|×)\s*([A-Z])")
 _SPACE_PUNCT = re.compile(r"\s+([,;:.)\]}])")
 _OPEN_SPACE = re.compile(r"([(\[{])\s+")
 
 
 def tidy_math_prose(text: str) -> str:
-    """把 PDF 抽字造成的 'x c m'、'ˆ x m'、TeX 残渣收成可读符号。已是 $LaTeX$ 的片段不动。"""
+    """把 PDF 抽字收成 $LaTeX$。数学片段按 KaTeX/Docling 方式整段切分，内部不再套 $。"""
     if not text:
         return text
-    text = _scrub_broken_math(text)
-    pieces = re.split(r"(\$\$[\s\S]*?\$\$|\$[^$]*\$)", text)
-    cleaned: list[str] = []
-    for piece in pieces:
-        if piece.startswith("$"):
-            cleaned.append(piece)
-            continue
-        paragraphs = [
-            _tidy_math_paragraph(part) if not part.strip().startswith("|") else part
-            for part in piece.split("\n")
-        ]
-        cleaned.append("\n".join(paragraphs))
-    out = "".join(cleaned)
+    text = text.replace("\ufffd", "")
+    text = _WORD_EMBEDDED_MATH.sub(_unwrap_word_math, text)
+    text = _EMBEDDED_MATH.sub(_unwrap_embedded_math, text)
+    text = _GLUED_IDENTIFIER.sub(_merge_glued_identifier, text)
+    text = _TEXT_UMLAUT.sub(lambda m: _UMLAUT_LETTER.get(m.group(1), m.group(0)), text)
+    text = _ACCENT_BEFORE_MATH.sub(_merge_accent_before_math, text)
+    text = _FLOOR_DOLLARS.sub(lambda m: r"$\lfloor " + m.group(1).strip() + r" \rfloor$", text)
+    text = _K_FLOOR.sub(lambda m: f"${m.group(1)} = {m.group(2)}$", text)
+    rebuilt: list[str] = []
+    for kind, body in _split_math_segments(text):
+        if kind == "display":
+            rebuilt.append(_emit_display(body))
+        elif kind == "inline":
+            rebuilt.append(_emit_inline(body))
+        else:
+            rebuilt.append(_tidy_text_segment(body))
+    out = _join_math_pieces(rebuilt)
+    out = _wrap_bare_inline_math(out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
 
 
-_BROKEN_INLINE = re.compile(r"\$([^$\n]+)\$")
 _WORD_EMBEDDED_MATH = re.compile(
     r"(?<=[A-Za-z])\$([A-Za-z]+(?:[\^_]\{[A-Za-z]+\})*)\$"
     r"|\$([A-Za-z]+(?:[\^_]\{[A-Za-z]+\})*)\$(?=[A-Za-z])"
 )
+_EQ_NUMBER_TAIL = re.compile(r"[.,]?\s*\((\d+[a-z]?)\)\s*$")
+_CMD_SPACE = re.compile(r"\\([A-Za-z]+)\s+\{")
+_BARE_TEX_CMD = re.compile(
+    r"(?<![$\\])("
+    r"\\[A-Za-z]+(?:\s*\{[^{}]{0,80}\})+"
+    r"(?:[_^](?:\{[^{}]{0,40}\}|[A-Za-z0-9]+))*"
+    r")"
+)
+_BEGIN_ENV = re.compile(
+    r"\\begin\{(align\*?|equation\*?|gather\*?|multline\*?|eqnarray\*?|aligned)\}"
+)
 
 
-def _scrub_broken_math(text: str) -> str:
-    text = re.sub(r"\$\$([\s\S]*?)\$\$", _drop_broken_display, text)
-    text = _BROKEN_INLINE.sub(_drop_broken_inline, text)
-    text = text.replace("\ufffd", "")
-    text = _WORD_EMBEDDED_MATH.sub(_unwrap_word_math, text)
-    text = _BROKEN_INLINE.sub(_drop_broken_inline, text)
-    text = _keep_valid_display(text)
-    text = _BROKEN_INLINE.sub(_drop_broken_inline, text)
-    return _wrap_bare_equations(text)
+def _join_math_pieces(pieces: list[str]) -> str:
+    out: list[str] = []
+    for piece in pieces:
+        if (
+            out
+            and out[-1].endswith("$")
+            and not out[-1].endswith("$$")
+            and piece[:1].isalpha()
+        ):
+            out.append(" ")
+        if out and piece.startswith("$") and not piece.startswith("$$") and out[-1][-1:].isalpha():
+            inner = piece.strip("$")[:2]
+            if not inner.startswith(("-", "−")):
+                out.append(" ")
+        out.append(piece)
+    return "".join(out)
 
 
-def _keep_valid_display(text: str) -> str:
+def _split_math_segments(text: str) -> list[tuple[str, str]]:
+    """按最长定界符扫描（$$ 优先于 $），空的 $$ 包装直接丢掉。"""
+    out: list[tuple[str, str]] = []
+    buf: list[str] = []
+    index = 0
+    length = len(text)
+
+    def flush_text() -> None:
+        if buf:
+            out.append(("text", "".join(buf)))
+            buf.clear()
+
+    def skip_extra_dollars(pos: int) -> int:
+        while pos < length:
+            cursor = pos
+            while cursor < length and text[cursor] in " \t\n":
+                cursor += 1
+            if text.startswith("$$", cursor):
+                pos = cursor + 2
+                continue
+            break
+        return pos
+
+    while index < length:
+        if text.startswith("\\$", index):
+            buf.append("\\$")
+            index += 2
+            continue
+        env_match = _BEGIN_ENV.match(text, index)
+        if env_match:
+            env = env_match.group(1)
+            close = f"\\end{{{env}}}"
+            end = text.find(close, env_match.end())
+            if end >= 0:
+                flush_text()
+                out.append(("display", text[index : end + len(close)]))
+                index = end + len(close)
+                continue
+        if text.startswith("\\[", index):
+            end = text.find("\\]", index + 2)
+            if end >= 0:
+                flush_text()
+                out.append(("display", text[index + 2 : end]))
+                index = end + 2
+                continue
+        if text.startswith("\\(", index):
+            end = text.find("\\)", index + 2)
+            if end >= 0:
+                flush_text()
+                out.append(("inline", text[index + 2 : end]))
+                index = end + 2
+                continue
+        if text.startswith("$$", index):
+            start = skip_extra_dollars(index + 2)
+            close = text.find("$$", start)
+            if close < 0:
+                buf.append(text[index:])
+                break
+            flush_text()
+            out.append(("display", text[start:close]))
+            index = skip_extra_dollars(close + 2)
+            continue
+        if text[index] == "$":
+            close = text.find("$", index + 1)
+            if close >= 0 and not text.startswith("$$", close):
+                flush_text()
+                out.append(("inline", text[index + 1 : close]))
+                index = close + 1
+                continue
+        buf.append(text[index])
+        index += 1
+    flush_text()
+    return out or [("text", text)]
+
+
+def _sanitize_math_body(body: str) -> str:
+    cleaned = _CMD_SPACE.sub(r"\\\1{", body.replace("$", "").replace("\ufffd", ""))
+    cleaned = re.sub(r"([_^])\{([^{}\\]*)\\\}", r"\1{\2}", cleaned)
+    cleaned = _LEAKED_SUB.sub(r"\1_\2 \3", cleaned)
+    cleaned = re.sub(r"(?<!mathbb\{)(?<![A-Za-z\\])R\^\{", r"\\mathbb{R}^{", cleaned)
+    cleaned = _WS_SCRIPT.sub(r"\1^{\2}_{\3}", cleaned)
+    cleaned = _REAL_SPACE.sub(r"\\mathbb{R}^{\1 \\times \2}", cleaned)
+    cleaned = re.sub(r"(\}_{[A-Za-z0-9]+}),(?=[A-Z])", r"\1, ", cleaned)
+    if cleaned.endswith(".") and not cleaned.endswith(r"\ldots"):
+        cleaned = cleaned[:-1]
+    if "\\begin{" not in cleaned:
+        cleaned = re.sub(r"[ \t]*\n[ \t]*", " ", cleaned)
+    return cleaned.strip()
+
+
+def _with_eq_tag(body: str) -> str:
+    match = _EQ_NUMBER_TAIL.search(body)
+    if not match:
+        return body
+    return body[: match.start()].rstrip(" .,") + rf" \tag{{{match.group(1)}}}"
+
+
+def _keep_as_display(body: str) -> bool:
     from dl_agent.knowledge.formula_latex import is_garbled_math, looks_like_latex
 
-    pieces: list[str] = []
-    last = 0
-    for match in re.finditer(r"\$\$([\s\S]*?)\$\$", text):
-        body = match.group(1).strip()
-        pieces.append(text[last:match.start()])
-        if (
-            body
-            and looks_like_latex(body)
-            and not is_garbled_math(body)
-            and ("=" in body or re.search(r"\\[A-Za-z]+", body))
-        ):
-            pieces.append(f"$$\n{body}\n$$")
-        else:
-            pieces.append(body)
-        last = match.end()
-    pieces.append(text[last:].replace("$$", ""))
-    return "".join(pieces)
+    blob = body.strip()
+    if not blob or is_garbled_math(blob) or not looks_like_latex(blob):
+        return False
+    if blob.count("{") != blob.count("}"):
+        return False
+    plain = re.sub(r"\\(?:mathrm|text|operatorname|mathbf|mathit)\{[^{}]*\}", "", blob)
+    plain = re.sub(r"\\[A-Za-z]+", "", plain)
+    if re.search(r"\b[A-Za-z]{5,}\b", plain):
+        return False
+    if "=" in blob:
+        return True
+    return bool("\\{" in blob or re.search(r"\\[A-Za-z]{2,}", blob))
 
 
-def _drop_broken_display(match: re.Match[str]) -> str:
-    from dl_agent.knowledge.formula_latex import is_garbled_math
-
-    body = match.group(1)
-    if not is_garbled_math(body):
-        if not body.strip():
-            return "\n"
-        return match.group(0)
-    cleaned = _BROKEN_INLINE.sub(_drop_broken_inline, body)
-    cleaned = cleaned.replace("\ufffd", "")
-    cleaned = re.sub(r"\$+", "", cleaned)
-    prose = cleaned.strip()
-    if len(re.sub(r"\s+", "", prose)) > 24:
-        return "\n" + prose + "\n"
+def _emit_display(body: str) -> str:
+    cleaned = _with_eq_tag(_sanitize_math_body(body))
+    if not cleaned:
+        return "\n"
+    if _keep_as_display(cleaned):
+        return f"\n$$\n{cleaned}\n$$\n"
+    if len(re.sub(r"\s+", "", cleaned)) > 24:
+        return "\n" + cleaned + "\n"
     return "\n"
 
 
-def _drop_broken_inline(match: re.Match[str]) -> str:
-    body = match.group(1)
-    if _is_junk_inline(body):
+def _emit_inline(body: str) -> str:
+    raw = body.strip()
+    trailing_dot = raw.endswith(".") and not raw.endswith(r"\ldots")
+    cleaned = _sanitize_math_body(body)
+    if _is_junk_inline(cleaned):
         return ""
-    return match.group(0)
+    return f"${cleaned}$." if trailing_dot else f"${cleaned}$"
 
 
 def _unwrap_word_math(match: re.Match[str]) -> str:
     inner = match.group(1) or match.group(2) or ""
     return re.sub(r"[\^_{}$]", "", inner)
-    leftover = text.split("$$")
-    if len(leftover) == 2:
-        text = leftover[0] + leftover[1]
-    elif len(leftover) > 2:
-        rebuilt: list[str] = [leftover[0]]
-        for index, chunk in enumerate(leftover[1:], start=1):
-            if index % 2 == 1 and looks_like_latex(chunk) and not is_garbled_math(chunk):
-                rebuilt.append(f"$$\n{chunk.strip()}\n$$")
-            else:
-                rebuilt.append(chunk)
-        text = "".join(rebuilt)
-    text = re.sub(r"\$\$\s*\$\$", "\n", text)
-    return _wrap_bare_equations(text)
 
 
 def _is_junk_inline(body: str) -> bool:
@@ -524,27 +704,190 @@ def _is_junk_inline(body: str) -> bool:
     return False
 
 
-def _wrap_bare_equations(text: str) -> str:
-    from dl_agent.knowledge.formula_latex import looks_like_latex
+_BARE_INLINE_MATH = re.compile(
+    r"(?<![$\\])(?<![A-Za-z0-9])"
+    r"("
+    r"[A-Za-z]_(?:[A-Za-z]{1,3}|\d{1,4})(?:\^(?:[A-Za-z]{1,3}|\d{1,4}))?"
+    r"(?:\s*=\s*\{[^{}\n]{1,200}\})?"
+    r")(?![A-Za-z0-9])"
+)
+_ABS_MATH = re.compile(r"\|([^|]{3,80})\|")
+_FLOOR_DOLLARS = re.compile(r"⌊\s*\$([^$]+)\$\s*⌋")
+_BARE_TEX_SYMBOL = re.compile(
+    r"(?<![$\\])(\\"
+    r"(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|"
+    r"iota|kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma|tau|"
+    r"upsilon|phi|varphi|chi|psi|omega|ell|infty|times|cdot|in|leq|geq|"
+    r"neq|pm|cap|cup|circ|odot)"
+    r")(?![A-Za-z])"
+)
+_K_FLOOR = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z])\s*=\s*\$(\\lfloor[^$]+\\rfloor)\$"
+)
+_EMBEDDED_MATH = re.compile(
+    r"([A-Za-z]{2,})\s*\$([-−]?)([^$\n]{1,40})\$\s*([A-Za-z]{2,})"
+)
+_GLUED_IDENTIFIER = re.compile(
+    r"\b([A-Z][A-Za-z]?)\s+([A-Za-z]{1,8})\s*\$(\\(?:in|subset|subseteq|notin|leq|geq)[^$]*)\$"
+)
+_SPACED_SUB = re.compile(r"\b([A-Z])\s+([a-z])\b")
+_LEAKED_SUB = re.compile(
+    r"([A-Za-z])\}([a-z]{1,4})\s*\^\{((?:\\times|\\cdot|\\otimes)\s*)"
+)
+_ENGLISH_CAPS = {"A", "I"}
 
-    lines = text.split("\n")
-    wrapped: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if (
-            stripped
-            and not stripped.startswith("$$")
-            and not stripped.startswith("|")
-            and "=" in stripped
-            and "\\" in stripped
-            and looks_like_latex(stripped)
-            and len(stripped) < 500
-            and not re.search(r"\b[A-Za-z]{5,}\b", re.sub(r"\\[A-Za-z]+", "", stripped))
-        ):
-            wrapped.append(f"$$\n{stripped}\n$$")
+
+def _unwrap_embedded_math(match: re.Match[str]) -> str:
+    left, hyphen, body, right = match.groups()
+    blob = body.strip().lstrip("-−")
+    if not re.fullmatch(r"[A-Za-z]+(?:\^\{[A-Za-z]+\}|\^[A-Za-z])?", blob):
+        return match.group(0)
+    letters = re.sub(r"[^A-Za-z]", "", blob)
+    glue = "-" if hyphen else ""
+    return f"{left}{glue}{letters}{right}"
+
+
+def _merge_glued_identifier(match: re.Match[str]) -> str:
+    base, sub, rest = match.group(1), match.group(2), match.group(3)
+    return f"${base}_{{\\mathrm{{{sub}}}}} {rest}$"
+
+
+def _accent_cmd(mark: str) -> str | None:
+    return _ACCENT_CMD.get(mark)
+
+
+def _merge_accent_before_math(match: re.Match[str]) -> str:
+    cmd = _accent_cmd(match.group(1))
+    if not cmd:
+        return match.group(0)
+    return f"$\\{cmd}{{{match.group(2)}}}{match.group(3)}$"
+
+
+def _replace_spaced_accent(match: re.Match[str]) -> str:
+    cmd = _accent_cmd(match.group(1))
+    if not cmd:
+        return match.group(0)
+    base, sub = match.group(2), match.group(3)
+    latex = f"\\{cmd}{{{base}}}"
+    if sub:
+        latex += f"_{sub}"
+    return f"${latex}$"
+
+
+def _replace_spaced_sub(match: re.Match[str]) -> str:
+    if match.group(1) in _ENGLISH_CAPS:
+        return match.group(0)
+    return f"${match.group(1)}_{match.group(2)}$"
+
+
+def _wrap_prose_math(text: str) -> str:
+    """把正文里的 x_m^i、|a-b|、\\mu、⌊$n\\times r$⌋ 收成行内公式。"""
+    text = _FLOOR_DOLLARS.sub(lambda m: r"$\lfloor " + m.group(1).strip() + r" \rfloor$", text)
+    text = _K_FLOOR.sub(lambda m: f"${m.group(1)} = {m.group(2)}$", text)
+    text = _ABS_MATH.sub(_replace_abs_math, text)
+    rebuilt: list[str] = []
+    for kind, body in _split_math_segments(text):
+        if kind == "display":
+            rebuilt.append(_emit_display(body))
+        elif kind == "inline":
+            rebuilt.append(_emit_inline(body))
         else:
-            wrapped.append(line)
-    return "\n".join(wrapped)
+            part = _BARE_TEX_CMD.sub(lambda m: f"${_sanitize_math_body(m.group(1))}$", body)
+            part = _BARE_TEX_SYMBOL.sub(r"$\1$", part)
+            part = _SPACED_SUB.sub(_replace_spaced_sub, part)
+            part = _BARE_INLINE_MATH.sub(_replace_bare_inline, part)
+            rebuilt.append(part)
+    return _join_math_pieces(rebuilt)
+
+
+def _replace_abs_math(match: re.Match[str]) -> str:
+    inner = match.group(1).strip()
+    if not re.search(r"[_^\\]", inner):
+        return match.group(0)
+    return r"$|" + re.sub(r"\s+", " ", inner) + "|$"
+
+
+def _wrap_bare_inline_math(text: str) -> str:
+    """把混在英文里的 x_m^p、x_m^p = {...} 收成 $LaTeX$，让前端 KaTeX 能渲染。"""
+    if not text:
+        return text
+    rebuilt: list[str] = []
+    for kind, body in _split_math_segments(text):
+        if kind == "display":
+            rebuilt.append(_emit_display(body))
+        elif kind == "inline":
+            rebuilt.append(_emit_inline(body))
+        elif body.strip().startswith("|"):
+            rebuilt.append(body)
+        else:
+            rebuilt.append(_wrap_prose_math(body))
+    return _join_math_pieces(rebuilt)
+
+
+def _replace_bare_inline(match: re.Match[str]) -> str:
+    expr = match.group(1)
+    if match.string[: match.start()].count("$") % 2 == 1:
+        return expr
+    before = match.string[max(0, match.start() - 12) : match.start()]
+    after = match.string[match.end() : match.end() + 8]
+    if re.search(r"\\[A-Za-z]*\{?$", before) or after.startswith("\\}") or after.startswith("}"):
+        return expr
+    body = re.sub(r"\s+", " ", expr.strip())
+    body = body.replace("...", r"\ldots")
+    body = body.replace("{", r"\{").replace("}", r"\}")
+    return f"${body}$"
+
+
+def _tidy_text_segment(text: str) -> str:
+    if not text:
+        return text
+    lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            lines.append(line)
+            continue
+        if _keep_as_display(_sanitize_math_body(stripped)):
+            lines.append(_emit_display(stripped).strip("\n"))
+            continue
+        lines.append(_tidy_math_paragraph(line))
+    cleaned = "\n".join(lines)
+    cleaned = _COMBINING_ACCENT.sub(_replace_combining_accent, cleaned)
+    return _map_plain(cleaned, _wrap_prose_math)
+
+
+def _map_plain(text: str, transform) -> str:
+    rebuilt: list[str] = []
+    for kind, body in _split_math_segments(text):
+        if kind == "display":
+            rebuilt.append(_emit_display(body))
+        elif kind == "inline":
+            rebuilt.append(_emit_inline(body))
+        else:
+            rebuilt.append(transform(body))
+    return _join_math_pieces(rebuilt)
+
+
+def _replace_combining_accent(match: re.Match[str]) -> str:
+    base, mark, sub = match.group(1), match.group(2), match.group(3)
+    cmd = _accent_cmd(mark) or "hat"
+    latex = f"\\{cmd}{{{base}}}"
+    if sub:
+        latex += f"_{{{sub}}}" if len(sub) > 1 else f"_{sub}"
+    return f"${latex}$"
+
+
+_PROSE_NAMES = {
+    "the", "and", "for", "with", "from", "this", "that", "where", "when",
+    "then", "than", "each", "both", "such", "also", "into", "over",
+}
+
+
+def _replace_named_triple(match: re.Match[str]) -> str:
+    name, sup, sub = match.group(1), match.group(2), match.group(3)
+    if name.lower() in _PROSE_NAMES:
+        return match.group(0)
+    return rf"\mathrm{{{name}}}_{sub}^{{{sup}}}"
 
 
 def _tidy_math_paragraph(text: str) -> str:
@@ -561,11 +904,128 @@ def _tidy_math_paragraph(text: str) -> str:
 
     cleaned = _TEX_JUNK.sub("", text)
     cleaned = _HAT.sub(replace_hat, cleaned)
+    cleaned = _SPACED_ACCENT.sub(_replace_spaced_accent, cleaned)
+    cleaned = _fold_spaced_math(cleaned)
     cleaned = _TRIPLE.sub(replace_triple, cleaned)
+    cleaned = _NAMED_TRIPLE.sub(_replace_named_triple, cleaned)
     cleaned = re.sub(r"\s*\|\s*", "|", cleaned)
     cleaned = _SPACE_PUNCT.sub(r"\1", cleaned)
     cleaned = _OPEN_SPACE.sub(r"\1", cleaned)
     return re.sub(r"[ \t]{2,}", " ", cleaned)
+
+
+_MATH_OP_CHARS = "×·⋅−±=∈∉⊂⊃∪∩→↔≤≥≠≈∼∘⊙∗+"
+_GREEK_CHARS = "αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩℓ"
+_MATH_TOKEN = re.compile(
+    rf"([A-Za-z]{{2,}})|([{_GREEK_CHARS}])|([A-Za-z])|(\d+)|([{re.escape(_MATH_OP_CHARS)}])|(\s+)|(.)"
+)
+_OP_TO_LATEX = {
+    "×": r"\times ",
+    "·": r"\cdot ",
+    "⋅": r"\cdot ",
+    "−": "-",
+    "±": r"\pm ",
+    "∈": r"\in ",
+    "∉": r"\notin ",
+    "≤": r"\leq ",
+    "≥": r"\geq ",
+    "≠": r"\neq ",
+    "≈": r"\approx ",
+    "→": r"\rightarrow ",
+    "⊂": r"\subset ",
+    "∪": r"\cup ",
+    "∩": r"\cap ",
+    "∘": r"\circ ",
+    "⊙": r"\odot ",
+    "∗": r"\ast ",
+    "+": "+",
+    "=": "=",
+}
+
+
+def _fold_spaced_math(text: str) -> str:
+    """把 L p × D、α ∈ [0,1] 这类「单字母+运算符」收成一段 $LaTeX$，不逐条写正则。"""
+    pieces: list[str] = []
+    run: list[tuple[str, str]] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        if _run_looks_like_math(run):
+            pieces.append("$" + _run_to_latex(run).strip() + "$")
+        else:
+            pieces.append("".join(value for _, value in run))
+        run.clear()
+
+    for match in _MATH_TOKEN.finditer(text):
+        word, greek, letter, number, op, space, other = match.groups()
+        if word:
+            flush()
+            pieces.append(word)
+        elif space:
+            if run:
+                run.append(("space", space))
+            else:
+                pieces.append(space)
+        elif greek:
+            run.append(("greek", greek))
+        elif letter:
+            run.append(("letter", letter))
+        elif number:
+            run.append(("number", number))
+        elif op:
+            run.append(("op", op))
+        elif other in "()[]{},.":
+            if run:
+                run.append(("punct", other))
+            else:
+                pieces.append(other)
+        else:
+            flush()
+            pieces.append(other or "")
+    flush()
+    return "".join(pieces)
+
+
+_SYMBOL_OPS = set("×·⋅−±∈∉⊂⊃∪∩→↔≤≥≠≈∼∘⊙∗")
+
+
+def _run_looks_like_math(run: list[tuple[str, str]]) -> bool:
+    atoms = [(kind, value) for kind, value in run if kind != "space"]
+    if len(atoms) < 3:
+        return False
+    return any(kind == "op" and value in _SYMBOL_OPS for kind, value in atoms)
+
+
+def _run_to_latex(run: list[tuple[str, str]]) -> str:
+    seq = [(kind, value) for kind, value in run if kind != "space"]
+    out: list[str] = []
+    index = 0
+    while index < len(seq):
+        kind, value = seq[index]
+        nxt = seq[index + 1] if index + 1 < len(seq) else None
+        if (
+            kind == "letter"
+            and nxt
+            and nxt[0] == "letter"
+            and len(value) == 1
+            and len(nxt[1]) == 1
+            and nxt[1].islower()
+        ):
+            out.append(f"{value}_{{{nxt[1]}}}")
+            index += 2
+            continue
+        if kind == "op":
+            out.append(_OP_TO_LATEX.get(value, value))
+            index += 1
+            continue
+        if kind == "punct" and value in "{}":
+            out.append("\\" + value)
+            index += 1
+            continue
+        out.append(value)
+        index += 1
+    return "".join(out)
 
 
 def _better_figure(new: Figure, old: Figure) -> bool:

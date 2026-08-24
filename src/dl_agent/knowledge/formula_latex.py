@@ -16,6 +16,9 @@ _MATH_FONT = re.compile(
     r"lmmath|latinmodernmath|texgyremath|mtmi|mtsy|symbol|cambria\s*math)",
     re.IGNORECASE,
 )
+_ITALIC_FONT = re.compile(r"italic|oblique", re.IGNORECASE)
+_SMALL_WORDS = {"of", "in", "to", "is", "or", "an", "as", "be", "we", "it", "at", "by", "if", "on"}
+_MATH_OPS = set("×·⋅−±=∈∉⊂⊃∪∩→↔≤≥≠≈∼∘⊙∗+")
 _EQ_NUMBER = re.compile(r"^\(\s*\d+\s*\)$")
 _WRAP = re.compile(r"^\s*(\${1,2}|\\\(|\\\[)\s*(.*?)\s*(\${1,2}|\\\)|\\\])\s*$", re.DOTALL)
 _ITALIC_WORD = re.compile(r"^[A-Za-z]{2,}$")
@@ -40,7 +43,8 @@ def normalize_latex(text: str | None) -> str:
     match = _WRAP.match(blob)
     if match:
         blob = match.group(2).strip()
-    blob = blob.replace("\n", " ").strip()
+    blob = blob.replace("\n", " ").replace("$", "").strip()
+    blob = re.sub(r"\\([A-Za-z]+)\s+\{", r"\\\1{", blob)
     return blob
 
 
@@ -135,7 +139,7 @@ def _extract_math_runs(pdf_path: str) -> list[_MathRun]:
                                 current = []
                                 last_x1 = None
                             continue
-                        if not _MATH_FONT.search(font):
+                        if not _is_math_span(text, font):
                             if current:
                                 runs.extend(_flush_run(page_index + 1, current))
                                 current = []
@@ -166,6 +170,8 @@ def _flush_run(page: int, spans: list[dict]) -> list[_MathRun]:
     parts = [str(span["text"]) for span in spans]
     glued = "".join(part.strip() for part in parts)
     if not glued or all(part.strip() in ".,;:()[]{}_^\\ " for part in parts):
+        return []
+    if len(spans) == 1 and glued.isalpha() and len(glued) <= 2:
         return []
     if _ITALIC_WORD.match(glued):
         sizes = {round(float(span["size"]), 1) for span in spans}
@@ -242,6 +248,25 @@ def _join_script_chunks(chunks: list[tuple[str, str]]) -> str:
     return "".join(out).strip()
 
 
+def _is_math_span(text: str, font: str) -> bool:
+    """数学字体、运算符，或斜体短符号（Times-Italic 的 L、p）都算行内公式片段。"""
+    blob = text.strip()
+    if not blob:
+        return False
+    if _MATH_FONT.search(font):
+        return True
+    if all(char in _MATH_OPS or char.isspace() for char in blob):
+        return True
+    if (
+        _ITALIC_FONT.search(font)
+        and len(blob) <= 2
+        and blob.lower() not in _SMALL_WORDS
+        and (blob.isalnum() or len(blob) == 1)
+    ):
+        return True
+    return False
+
+
 def _escape_token(text: str) -> str:
     specials = {
         "\\": r"\backslash ",
@@ -251,6 +276,19 @@ def _escape_token(text: str) -> str:
         "&": r"\&",
         "#": r"\#",
         "_": r"\_",
+        "×": r"\times ",
+        "·": r"\cdot ",
+        "⋅": r"\cdot ",
+        "−": "-",
+        "±": r"\pm ",
+        "∈": r"\in ",
+        "≤": r"\leq ",
+        "≥": r"\geq ",
+        "≠": r"\neq ",
+        "≈": r"\approx ",
+        "→": r"\rightarrow ",
+        "⊙": r"\odot ",
+        "∘": r"\circ ",
     }
     return "".join(specials.get(char, char) for char in text)
 
@@ -297,12 +335,24 @@ def _splice_latex(text: str, parts: list[str], latex: str) -> str | None:
         if not token or token not in text:
             continue
         if len(token) == 1 and token.isalpha() and _WORD_TOKEN.search(text):
-            pattern = re.compile(rf"(?<![A-Za-z$]){re.escape(token)}(?![A-Za-z])")
-            if not pattern.search(text):
+            pattern = re.compile(rf"(?<![A-Za-z$\\]){re.escape(token)}(?![A-Za-z])")
+            match = pattern.search(text)
+            if not match or _inside_math(text, match.start()):
                 continue
             return pattern.sub(wrapped, text, count=1)
+        index = text.find(token)
+        if index >= 0 and _inside_math(text, index):
+            continue
         return text.replace(token, wrapped, 1)
     return None
+
+
+def _inside_math(text: str, index: int) -> bool:
+    before = text[:index]
+    if before.count("$$") % 2 == 1:
+        return True
+    dollars = before.replace("$$", "")
+    return dollars.count("$") % 2 == 1
 
 
 def _overlap(

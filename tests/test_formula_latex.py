@@ -52,7 +52,26 @@ def test_tidy_does_not_break_latex_dollars() -> None:
     raw = "Here, $x^{c}_{m}$ denotes the CLS token, while x p m stays."
     out = tidy_math_prose(raw)
     assert "$x^{c}_{m}$" in out
-    assert "x_m^p" in out
+    assert "$x_m^p$" in out
+
+
+def test_tidy_folds_spaced_letters_with_operators() -> None:
+    out = tidy_math_prose("The patch tokens have shape L p × D after pooling.")
+    assert r"$L_{p} \times D$" in out or r"$L_{p}\times D$" in out
+    assert "shape $" in out
+    prose = tidy_math_prose("the CLS token remains readable")
+    assert "$" not in prose
+    raw = (
+        "denotes the CLS token, which summarizes the global semantic knowledge "
+        "of the image, while x_m^p = {x_m^1, x_m^2, ..., x_m^n} represents the "
+        "patch tokens that capture local spatial details."
+    )
+    out = tidy_math_prose(raw)
+    assert "$x_m^p =" in out
+    assert r"\ldots" in out
+    assert r"\{x_m^1" in out
+    assert "while $" in out
+    assert "$ represents" in out
 
 
 def test_looks_like_latex_rejects_replacement_chars() -> None:
@@ -115,3 +134,114 @@ def test_display_vs_inline_by_bbox() -> None:
     tiny = LayoutItem(kind="formula", page=1, bbox=(90, 100, 118, 112))
     assert is_display_formula(wide)
     assert not is_display_formula(tiny)
+
+
+def test_tidy_repairs_nested_dollars_and_unicode_hats() -> None:
+    raw = (
+        "The resulting x̂_m retains the most discriminative local details.\n\n"
+        "α-fusion. The global feature $x_m^c$ and the local feature \\hat{x}_m "
+        "are fused with a weighting factor:\n\n"
+        "$$\n$$\n"
+        r"\hat {f}_m = \alpha \cdot x_m^$c+(1$- \alpha) \cdot \hat {x}_m, (9)"
+        "\n$$\n$$"
+    )
+    out = tidy_math_prose(raw)
+    assert r"$\hat{x}_m$" in out
+    assert "$x_m^c$" in out
+    assert "x_m^$c" not in out
+    assert "(1$-" not in out
+    assert out.count("$$") == 2
+    assert r"\hat{f}_m" in out
+    assert r"\cdot" in out
+    assert r"\tag{9}" in out
+    twice = tidy_math_prose(out)
+    assert r"\hat{f}_m" in twice
+    assert twice.count("$$") == 2
+
+
+def test_tidy_does_not_wrap_plus_fragments_inside_latex() -> None:
+    raw = r"The fused map is \hat{f}_m = \alpha \cdot x_m^c+(1- \alpha) \cdot \hat{x}_m."
+    out = tidy_math_prose(raw)
+    assert "$c+(1$" not in out
+    assert "$x_m^c$" in out
+
+
+def test_tidy_wraps_inline_symbols_even_when_line_has_tex() -> None:
+    raw = (
+        "where n is the number of patch tokens, x_m^i denotes the original "
+        "patch feature, x_f^i the low-pass filtered patch feature, and the "
+        "absolute difference|x_m^i - x_f^i|represents the residual. "
+        r"The terms \mu and \sigma denote the mean and standard deviation "
+        r"of all residuals, respectively. We then select the top "
+        r"K = ⌊ $n\times r$⌋ (r denotes the selection ratio of tokens) patches."
+    )
+    out = tidy_math_prose(raw)
+    assert "$x_m^i$" in out
+    assert "$x_f^i$" in out
+    assert r"$|x_m^i - x_f^i|$" in out
+    assert r"$\mu$" in out
+    assert r"$\sigma$" in out
+    assert r"\lfloor n\times r \rfloor" in out
+    assert "⌊ $" not in out
+
+
+def test_tidy_repairs_linear_weight_matrix_inline() -> None:
+    raw = (
+        "where Linear S m and Linear P m denote the shared and private "
+        "linear transformation layers for modality m, respectively, and "
+        r"their corresponding weight matrices are $WS_{m},WP_{m}\in RD\times D.$"
+    )
+    out = tidy_math_prose(raw)
+    assert "Linear S m" not in out
+    assert r"\mathrm{Linear}_m^{S}" in out
+    assert r"\mathrm{Linear}_m^{P}" in out
+    assert r"W^{S}_{m}" in out
+    assert r"W^{P}_{m}" in out
+    assert r"\mathbb{R}^{D \times D}" in out or r"\mathbb{R}^{D\times D}" in out
+    assert r"RD\times D" not in out
+
+
+def test_tidy_repairs_hyphen_word_and_leaked_subscript() -> None:
+    raw = (
+        r"To obtain a unified multi$-mo^{d}$ al representation, we concatenate. "
+        r"A set of shared latent tokens Z inv $\in R^{B\times L}s^{\times D}$ "
+        r"is initialized. The number of shared latent variables L s is 24. "
+        r"Similarly F cls $\in R^{n\times P}q^{\times D}$ and K p tokens."
+    )
+    out = tidy_math_prose(raw)
+    assert "multi-modal" in out
+    assert "$mo^{d}$" not in out
+    assert r"Z_{\mathrm{inv}}" in out
+    assert r"F_{\mathrm{cls}}" in out
+    assert r"$L_s$" in out
+    assert r"$K_p$" in out
+    assert r"\mathbb{R}^{B\times L_s \times D}" in out
+    assert r"P_q" in out
+    assert r"L}s^{" not in out
+    assert "Z inv" not in out
+
+
+def test_tidy_merges_orphan_accents_into_math() -> None:
+    raw = (
+        r"based on the patch tokens ¨ $x_m^p$, the shared tokens ˜ $y_i$, "
+        "the spaced form ¨ x m, and the combining form x\u0308_m. "
+        r"Bernhard Sch¨ olkopf, and Olivier Bachem."
+    )
+    out = tidy_math_prose(raw)
+    assert r"\ddot{x}_m^p" in out
+    assert "¨" not in out
+    assert r"\tilde{y}_i" in out
+    assert r"\ddot{x}_m" in out
+    assert "Schölkopf" in out
+    assert r"\ddot{o}" not in out
+
+
+def test_sanitize_closes_escaped_script_braces() -> None:
+    raw = (
+        "$$\n"
+        r"\mathbf{x}_{m}^{(l+1)\}=\text{SPBF}(\mathbf{x}_{m}^{(l)}) \tag{21}"
+        "\n$$"
+    )
+    out = tidy_math_prose(raw)
+    assert r"^{(l+1)}" in out
+    assert r"^{(l+1)\}" not in out

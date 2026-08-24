@@ -1,7 +1,15 @@
-import type { Figure, Health, MethodExplain, Paper, PaperIntro, Section } from "./types";
+import type {
+  Figure,
+  Health,
+  MethodExplain,
+  Paper,
+  PaperIntro,
+  PaperTranslation,
+  Section,
+} from "./types";
 import { HttpError, type ApiError } from "./types";
 
-export type { Figure, Health, MethodExplain, Paper, PaperIntro, Section };
+export type { Figure, Health, MethodExplain, Paper, PaperIntro, PaperTranslation, Section };
 export { HttpError };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -77,6 +85,35 @@ export function figureUrl(paperId: string, figureId: string) {
 
 export function sourcePdfUrl(paperId: string) {
   return `/api/papers/${paperId}/source`;
+}
+
+export function startTranslations(paperId: string, refresh = false) {
+  const query = refresh ? "?refresh=true" : "";
+  return request<PaperTranslation>(`/papers/${paperId}/translations${query}`, {
+    method: "POST",
+  });
+}
+
+export function getTranslations(paperId: string) {
+  return request<PaperTranslation>(`/papers/${paperId}/translations`);
+}
+
+export async function ensureTranslations(paperId: string): Promise<PaperTranslation> {
+  try {
+    return await startTranslations(paperId);
+  } catch (error) {
+    if (!(error instanceof HttpError && error.status === 202)) throw error;
+  }
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 3000));
+    try {
+      return await getTranslations(paperId);
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 202) continue;
+      throw error;
+    }
+  }
+  throw new Error("翻译超时，请稍后重试");
 }
 
 export function formatApiError(error: unknown): string {

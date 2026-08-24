@@ -7,6 +7,7 @@ PaperStatus = Literal[
 ]
 ParserName = Literal["docling", "pymupdf"]
 ExplainStatus = Literal["pending", "ready", "failed", "skipped", "partial"]
+TranslateStatus = Literal["pending", "ready", "failed", "partial"]
 SectionKind = Literal[
     "abstract",
     "intro",
@@ -35,6 +36,7 @@ class Paper(BaseModel):
     language: str = "eng"
     intro_status: ExplainStatus = "pending"
     method_status: ExplainStatus = "pending"
+    translate_status: TranslateStatus = "pending"
 
 
 class Section(BaseModel):
@@ -112,3 +114,17 @@ class MethodExplain(BaseModel):
     section_match: str = "matched"
     model: str
     prompt_version: str
+
+
+class SectionTranslation(BaseModel):
+    section_id: str
+    title_zh: str
+    text_zh: str
+
+
+class PaperTranslation(BaseModel):
+    paper_id: str
+    status: TranslateStatus
+    model: str
+    prompt_version: str
+    sections: list[SectionTranslation] = Field(default_factory=list)

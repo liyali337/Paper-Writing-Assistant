@@ -1,6 +1,5 @@
 import type { Figure, PaperIntro, Section } from "../api/types";
 import { FigureCard } from "./FigureViews";
-import { SectionReader } from "./SectionReader";
 
 type Props = {
   intro: PaperIntro | null;
@@ -23,25 +22,12 @@ export function IntroPanel({
   onJump,
   onOpenFigure,
   onJumpSectionTitle,
-  focusSectionId,
 }: Props) {
   if (!intro) {
     return (
-      <SectionReader
-        sections={sections}
-        figures={figures}
-        paperId={paperId}
-        preview={preview}
-        heading="章节原文"
-        note={
-          sections.length
-            ? "中文总体介绍将在下一阶段生成。下面是按标题切开的原文与抽出的图，可点页码跳到左侧 PDF。"
-            : "解析完成后会按标题列出章节原文，并生成中文问题、动机与贡献。"
-        }
-        focusId={focusSectionId}
-        onJump={onJump}
-        onOpenFigure={onOpenFigure}
-      />
+      <div className="empty">
+        {sections.length ? <p>总体介绍生成中…</p> : <p>解析完成后将生成总体介绍。</p>}
+      </div>
     );
   }
 
