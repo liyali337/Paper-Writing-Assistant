@@ -6,6 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
         env_prefix="DL_AGENT_",
         extra="ignore",
         populate_by_name=True,
@@ -25,9 +27,9 @@ class Settings(BaseSettings):
         default="https://generativelanguage.googleapis.com/v1beta/openai/",
         validation_alias="OPENAI_BASE_URL",
     )
-    model_name: str = Field(default="gemini-2.5-flash", validation_alias="MODEL_NAME")
-    translate_prompt_version: str = "translate-v1"
-    translate_section_delay_s: float = 6.5
+    model_name: str = Field(default="gemini-3.6-flash", validation_alias="MODEL_NAME")
+    translate_prompt_version: str = "translate-v2"
+    translate_section_delay_s: float = 1.5
 
 
 def get_settings() -> Settings:

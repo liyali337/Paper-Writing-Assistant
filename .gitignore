@@ -11,7 +11,7 @@ htmlcov/
 
 .env
 .env.local
-data/
+/data/
 *.pdf
 
 node_modules/

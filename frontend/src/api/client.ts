@@ -104,7 +104,8 @@ export async function ensureTranslations(paperId: string): Promise<PaperTranslat
   } catch (error) {
     if (!(error instanceof HttpError && error.status === 202)) throw error;
   }
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  // 章节较多时串行翻译可能超过 6 分钟；放宽到约 15 分钟
+  for (let attempt = 0; attempt < 300; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 3000));
     try {
       return await getTranslations(paperId);

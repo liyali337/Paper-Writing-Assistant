@@ -24,7 +24,7 @@ def chat(
     messages: list[dict[str, Any]],
     *,
     settings: Settings | None = None,
-    timeout_s: float = 120.0,
+    timeout_s: float = 180.0,
 ) -> str:
     settings = settings or get_settings()
     if not settings.openai_api_key.strip():

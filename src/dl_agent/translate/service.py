@@ -12,7 +12,7 @@ from typing import Callable
 from dl_agent.config import Settings, get_settings
 from dl_agent.domain.models import PaperTranslation, Section, SectionTranslation, TranslateStatus
 from dl_agent.harness.complete import LlmNotConfiguredError, LlmRequestError, chat
-from dl_agent.knowledge.service import KnowledgeService, PaperNotFoundError
+from dl_agent.knowledge.service import KnowledgeService
 from dl_agent.knowledge.store import FilePaperStore
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,12 @@ class TranslateService:
     def get_translation(self, paper_id: str) -> PaperTranslation | None:
         self.knowledge.get_paper(paper_id)
         cached = self.store.get_translation(paper_id)
-        if cached and cached.prompt_version == self.settings.translate_prompt_version:
+        if cached is None:
+            return None
+        # pending 即使版本旧也要返回，否则前端轮询会 404
+        if cached.status == "pending":
+            return cached
+        if cached.prompt_version == self.settings.translate_prompt_version:
             return cached
         return None
 
@@ -59,15 +64,21 @@ class TranslateService:
 
         cached = self.get_translation(paper_id)
         if cached and not refresh:
-            if cached.status in {"ready", "partial", "failed"}:
+            same_version = cached.prompt_version == self.settings.translate_prompt_version
+            if cached.status in {"ready", "partial", "failed"} and same_version:
                 return cached, False
-            if cached.status == "pending":
+            if cached.status == "pending" and same_version:
                 return cached, False
 
         with self._lock:
             paper = self.knowledge.get_paper(paper_id)
             running = self.store.get_translation(paper_id)
-            if running and running.status == "pending" and not refresh:
+            if (
+                running
+                and running.status == "pending"
+                and running.prompt_version == self.settings.translate_prompt_version
+                and not refresh
+            ):
                 return running, False
             paper.translate_status = "pending"
             self.store.save_paper(paper)
@@ -85,13 +96,26 @@ class TranslateService:
         sections = self.knowledge.get_sections(paper_id)
         translated: list[SectionTranslation] = []
         failed = False
+        llm_ok = 0
+        need_delay = False
         started = time.perf_counter()
 
-        for index, section in enumerate(sections):
+        for section in sections:
             try:
-                item = self._translate_section(section)
+                if _skip_section(section):
+                    translated.append(_skipped_translation(section))
+                    continue
+                if need_delay:
+                    time.sleep(self.settings.translate_section_delay_s)
+                item = self._translate_section_llm(section)
                 translated.append(item)
-            except (LlmNotConfiguredError, LlmRequestError) as exc:
+                llm_ok += 1
+                need_delay = True
+                self._save_progress(paper_id, translated, status="pending")
+            except LlmNotConfiguredError:
+                failed = True
+                break
+            except LlmRequestError as exc:
                 logger.warning(
                     "translate section failed paper_id=%s section_id=%s error=%s",
                     paper_id,
@@ -99,7 +123,14 @@ class TranslateService:
                     exc,
                 )
                 failed = True
-                break
+                translated.append(
+                    SectionTranslation(
+                        section_id=section.section_id,
+                        title_zh=section.title,
+                        text_zh=section.text,
+                    )
+                )
+                continue
             except Exception:
                 logger.exception(
                     "translate section failed paper_id=%s section_id=%s",
@@ -107,13 +138,17 @@ class TranslateService:
                     section.section_id,
                 )
                 failed = True
-                break
-            if index + 1 < len(sections):
-                time.sleep(self.settings.translate_section_delay_s)
+                translated.append(
+                    SectionTranslation(
+                        section_id=section.section_id,
+                        title_zh=section.title,
+                        text_zh=section.text,
+                    )
+                )
+                continue
 
-        status: TranslateStatus
-        if failed and not translated:
-            status = "failed"
+        if failed and llm_ok == 0:
+            status: TranslateStatus = "failed"
         elif failed:
             status = "partial"
         else:
@@ -142,13 +177,24 @@ class TranslateService:
         )
         return result
 
-    def _translate_section(self, section: Section) -> SectionTranslation:
-        if section.kind == "references" or not section.text.strip():
-            return SectionTranslation(
-                section_id=section.section_id,
-                title_zh=section.title,
-                text_zh=section.text,
+    def _save_progress(
+        self,
+        paper_id: str,
+        sections: list[SectionTranslation],
+        *,
+        status: TranslateStatus,
+    ) -> None:
+        self.store.save_translation(
+            PaperTranslation(
+                paper_id=paper_id,
+                status=status,
+                model=self.settings.model_name,
+                prompt_version=self.settings.translate_prompt_version,
+                sections=list(sections),
             )
+        )
+
+    def _translate_section_llm(self, section: Section) -> SectionTranslation:
         payload = json.dumps(
             {"title": section.title, "text": section.text},
             ensure_ascii=False,
@@ -176,6 +222,35 @@ class TranslateService:
             title_zh=title_zh,
             text_zh=text_zh,
         )
+
+
+def _skipped_translation(section: Section) -> SectionTranslation:
+    title_zh = section.title
+    if section.kind == "references" or _looks_like_references(section.title):
+        title_zh = "参考文献"
+    return SectionTranslation(
+        section_id=section.section_id,
+        title_zh=title_zh,
+        text_zh=section.text,
+    )
+
+
+def _looks_like_references(title: str) -> bool:
+    return bool(re.search(r"\breferences\b|\bbibliography\b|参考文献", title, re.I))
+
+
+def _looks_like_acknowledgements(title: str) -> bool:
+    return bool(re.search(r"acknowledgements?|acknowledgments?|致谢", title, re.I))
+
+
+def _skip_section(section: Section) -> bool:
+    if not section.text.strip():
+        return True
+    if section.kind == "references":
+        return True
+    if _looks_like_references(section.title) or _looks_like_acknowledgements(section.title):
+        return True
+    return False
 
 
 def _parse_json_object(raw: str) -> dict:

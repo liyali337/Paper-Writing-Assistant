@@ -18,18 +18,22 @@ def _parse_stub(_path: str) -> ParseResult:
     body = "Readable paper text for translation tests. " * 20
     return ParseResult(
         parser="pymupdf",
-        page_count=1,
+        page_count=2,
         items=[
             LayoutItem(kind="heading", page=1, text="Abstract", level=1),
             LayoutItem(kind="text", page=1, text=body),
             LayoutItem(kind="heading", page=1, text="1 Introduction", level=1),
             LayoutItem(kind="text", page=1, text=body),
+            LayoutItem(kind="heading", page=2, text="References", level=1),
+            LayoutItem(kind="text", page=2, text="[1] Alice et al. Example Paper. 2024."),
         ],
     )
 
 
 def _chat_stub(messages: list[dict[str, str]]) -> str:
     user = messages[-1]["content"]
+    if "References" in user or "Bibliography" in user:
+        raise AssertionError("references must not call the LLM")
     if "Abstract" in user:
         return json.dumps(
             {
@@ -78,7 +82,11 @@ def test_translate_sections_background(translate_client) -> None:
 
     result = translate.finish_translation(paper_id)
     assert result.status == "ready"
-    assert len(result.sections) == 2
+    assert len(result.sections) == 3
+    assert result.sections[0].title_zh == "摘要"
+    refs = result.sections[-1]
+    assert refs.title_zh == "参考文献"
+    assert "Alice" in refs.text_zh
 
     fetched = client.get(f"/papers/{paper_id}/translations")
     assert fetched.status_code == 200
