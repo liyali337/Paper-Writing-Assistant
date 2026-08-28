@@ -120,6 +120,9 @@ class SectionTranslation(BaseModel):
     section_id: str
     title_zh: str
     text_zh: str
+    partial: bool = False
+    chunks_done: int = 0
+    chunks_total: int = 0
 
 
 class PaperTranslation(BaseModel):
@@ -127,4 +130,6 @@ class PaperTranslation(BaseModel):
     status: TranslateStatus
     model: str
     prompt_version: str
+    title_zh: str | None = None
     sections: list[SectionTranslation] = Field(default_factory=list)
+    error: str | None = None

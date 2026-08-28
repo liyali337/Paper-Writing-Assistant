@@ -134,8 +134,7 @@ def get_translations(
     cached = translate.get_translation(paper_id)
     if cached is None:
         raise api_error(404, "not_found", "translations", "尚未开始翻译")
-    if cached.status == "pending":
-        raise api_error(202, "pending", "translations", "翻译进行中")
+    # pending / failed / ready / partial 都直接返回正文，避免前端空转 202
     return cached
 
 
@@ -154,11 +153,9 @@ def start_translations(
     if paper.status != "ready":
         raise api_error(409, "not_ready", "translations", "论文尚未解析完成")
     try:
-        cached, should_run = translate.start_translation(paper_id, refresh=refresh)
+        cached, should_run, run_id = translate.start_translation(paper_id, refresh=refresh)
     except LlmNotConfiguredError as exc:
         raise api_error(503, "llm_not_configured", "translations", str(exc)) from exc
     if should_run:
-        background.add_task(translate.finish_translation, paper_id)
-    if cached.status == "pending":
-        raise api_error(202, "pending", "translations", "翻译进行中")
+        background.add_task(translate.finish_translation, paper_id, run_id)
     return cached

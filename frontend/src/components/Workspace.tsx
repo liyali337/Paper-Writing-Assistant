@@ -278,6 +278,7 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
           figures={figures}
           paperId={preview ? "demo" : paperId}
           paperTitle={paperTitle}
+          paperAuthors={paper?.authors ?? []}
           preview={preview}
           focusSection={focusSection}
           page={page}

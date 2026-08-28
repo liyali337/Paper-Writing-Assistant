@@ -2,14 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PDFWorker, getDocument, type PDFDocumentProxy, type RenderTask } from "pdfjs-dist";
 import PdfJsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
 
-import { ensureTranslations, formatApiError } from "../api/client";
-import type { Figure, Section, SectionTranslation } from "../api/types";
-import { demoTranslations } from "../data/demo";
+import { formatApiError, getTranslations, startTranslations } from "../api/client";
+import type { Figure, PaperTranslation, Section, SectionTranslation } from "../api/types";
+import { HttpError } from "../api/types";
+import { demoTitleZh, demoTranslations } from "../data/demo";
 import { DemoDiagram } from "./DemoDiagram";
 import { Chevron } from "./icons";
 import { SectionReader, type LangMode } from "./SectionReader";
 
 export type SourceView = "pdf" | "sections";
+
+function usableTranslation(zh: SectionTranslation): boolean {
+  if (!zh.text_zh.trim()) return false;
+  return /[\u4e00-\u9fff]/.test(zh.text_zh);
+}
 
 type Props = {
   view: SourceView;
@@ -19,6 +25,7 @@ type Props = {
   figures: Figure[];
   paperId: string | null;
   paperTitle: string | null;
+  paperAuthors?: string[];
   preview: boolean;
   focusSection: string | null;
   page: number;
@@ -36,6 +43,7 @@ export function PdfPane({
   figures,
   paperId,
   paperTitle,
+  paperAuthors = [],
   preview,
   focusSection,
   page,
@@ -48,10 +56,115 @@ export function PdfPane({
   const [showEn, setShowEn] = useState(true);
   const [showZh, setShowZh] = useState(true);
   const [translations, setTranslations] = useState<Map<string, SectionTranslation>>(new Map());
+  const [titleZh, setTitleZh] = useState<string | null>(null);
   const [translating, setTranslating] = useState(false);
+  const [translateHint, setTranslateHint] = useState<string | null>(null);
   const [translateError, setTranslateError] = useState<string | null>(null);
 
   const lang = useMemo<LangMode>(() => ({ showEn, showZh }), [showEn, showZh]);
+
+  const translateProgress = useMemo(() => {
+    if (preview || sections.length === 0) return null;
+    const total = sections.filter(
+      (section) =>
+        section.text.trim() &&
+        section.kind !== "references" &&
+        !/^(references|bibliography|参考文献)$/i.test(section.title.trim()),
+    ).length;
+    const done = sections.filter((section) => {
+      const zh = translations.get(section.section_id);
+      return zh && !zh.partial && usableTranslation(zh);
+    }).length;
+    return { done, total };
+  }, [preview, sections, translations]);
+
+  const applyPayload = useCallback((payload: PaperTranslation) => {
+    setTranslations(new Map(payload.sections.map((item) => [item.section_id, item])));
+    setTitleZh(payload.title_zh?.trim() || null);
+  }, []);
+
+  const loadTranslations = useCallback(
+    async (refresh = false) => {
+      if (!paperId || preview || sections.length === 0) return;
+      setTranslating(true);
+      setTranslateError(null);
+      setTranslateHint(null);
+      try {
+        let payload: PaperTranslation;
+        if (refresh) {
+          setTranslations(new Map());
+          setTitleZh(null);
+          setTranslateHint("正在重新翻译，请稍候…");
+          payload = await startTranslations(paperId, true);
+        } else {
+          try {
+            payload = await getTranslations(paperId);
+          } catch (error) {
+            if (error instanceof HttpError && error.status === 404) {
+              payload = await startTranslations(paperId, false);
+            } else {
+              throw error;
+            }
+          }
+          // pending 可能是服务重启后的僵尸任务：POST 触发后台续跑
+          if (payload.status === "pending") {
+            payload = await startTranslations(paperId, false);
+          }
+        }
+        applyPayload(payload);
+        if (payload.status === "failed") {
+          setTranslateError(
+            payload.error
+              ? `翻译失败：${payload.error}`
+              : "翻译失败，请检查 .env 中的 API Key / 模型名后重试",
+          );
+          return;
+        }
+        let stagnantPolls = 0;
+        let lastSectionCount = payload.sections.length;
+        while (payload.status === "pending") {
+          await new Promise((resolve) => window.setTimeout(resolve, 2500));
+          payload = await getTranslations(paperId);
+          applyPayload(payload);
+          if (payload.sections.length > lastSectionCount) {
+            lastSectionCount = payload.sections.length;
+            stagnantPolls = 0;
+            setTranslateHint(null);
+          } else {
+            stagnantPolls += 1;
+            // 分块翻译时整章完成前章节数不变，60s 后仅提示仍进行中
+            if (stagnantPolls === 24) {
+              setTranslateHint("当前章节较长，仍在翻译中…");
+            }
+            // 5 分钟无新章节：尝试续跑后台任务（服务重启等场景）
+            if (stagnantPolls > 0 && stagnantPolls % 120 === 0) {
+              payload = await startTranslations(paperId, false);
+              applyPayload(payload);
+            }
+            // 15 分钟仍 pending 才视为超时
+            if (stagnantPolls >= 360) {
+              setTranslateError("翻译超时，请点击「重新翻译」继续");
+              return;
+            }
+          }
+        }
+        if (payload.status === "failed") {
+          setTranslateError(
+            payload.error
+              ? `翻译失败：${payload.error}`
+              : "翻译失败，请检查 .env 中的 API Key / 模型名后重试",
+          );
+          return;
+        }
+        applyPayload(payload);
+      } catch (error) {
+        setTranslateError(formatApiError(error));
+      } finally {
+        setTranslating(false);
+      }
+    },
+    [applyPayload, paperId, preview, sections.length],
+  );
 
   const toggleEn = useCallback(() => {
     setShowEn((current) => {
@@ -74,32 +187,23 @@ export function PdfPane({
     }
     if (preview) {
       setTranslations(new Map(demoTranslations.map((item) => [item.section_id, item])));
+      setTitleZh(demoTitleZh);
       setTranslateError(null);
+      setTranslateHint(null);
       setTranslating(false);
       return;
     }
     if (!paperId || sections.length === 0) return;
 
     let cancelled = false;
-    setTranslating(true);
-    setTranslateError(null);
-    ensureTranslations(paperId)
-      .then((payload) => {
-        if (cancelled) return;
-        setTranslations(new Map(payload.sections.map((item) => [item.section_id, item])));
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setTranslateError(formatApiError(error));
-      })
-      .finally(() => {
-        if (!cancelled) setTranslating(false);
-      });
+    void loadTranslations(false).finally(() => {
+      if (cancelled) setTranslating(false);
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [paperId, preview, sections.length, showZh]);
+  }, [loadTranslations, paperId, preview, sections.length, showZh]);
 
   return (
     <section className="pane pdf-pane">
@@ -134,7 +238,21 @@ export function PdfPane({
             >
               中文
             </button>
-            {translating ? <span className="lang-status">翻译中…</span> : null}
+            <button
+              className="ghost-btn"
+              type="button"
+              disabled={preview || !paperId}
+              onClick={() => void loadTranslations(true)}
+            >
+              重新翻译
+            </button>
+            {translating && translateProgress ? (
+              <span className="lang-status">
+                翻译中 {translateProgress.done}/{translateProgress.total}
+              </span>
+            ) : translating ? (
+              <span className="lang-status">翻译中…</span>
+            ) : null}
           </div>
         ) : null}
         <span className="grow" />
@@ -184,10 +302,14 @@ export function PdfPane({
             paperId={paperId}
             preview={preview}
             paperTitle={paperTitle}
+            paperTitleZh={titleZh}
+            paperAuthors={paperAuthors}
             focusId={focusSection}
             lang={lang}
             translations={translations}
             translating={translating}
+            translateHint={translateHint}
+            translateProgress={translateProgress}
             translateError={translateError}
             onJump={(nextPage) => {
               onPage(nextPage);

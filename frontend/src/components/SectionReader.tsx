@@ -6,7 +6,7 @@ import {
   type ProseBlock,
 } from "../lib/mdTable";
 import { FigureCard } from "./FigureViews";
-import { MathText } from "./MathText";
+import { MathDisplay, MathText, segmentByDisplayMath } from "./MathText";
 
 export type LangMode = {
   showEn: boolean;
@@ -19,12 +19,16 @@ type Props = {
   paperId: string | null;
   preview: boolean;
   paperTitle?: string | null;
+  paperTitleZh?: string | null;
+  paperAuthors?: string[];
   heading?: string;
   note?: string;
   focusId?: string | null;
   lang?: LangMode;
   translations?: Map<string, SectionTranslation>;
   translating?: boolean;
+  translateHint?: string | null;
+  translateProgress?: { done: number; total: number } | null;
   translateError?: string | null;
   onJump: (page: number, sectionId?: string) => void;
   onOpenFigure: (figure: Figure) => void;
@@ -36,12 +40,16 @@ export function SectionReader({
   paperId,
   preview,
   paperTitle,
+  paperTitleZh,
+  paperAuthors,
   heading,
   note,
   focusId,
   lang,
   translations,
   translating,
+  translateHint,
+  translateProgress,
   translateError,
   onJump,
   onOpenFigure,
@@ -52,7 +60,9 @@ export function SectionReader({
   if (sections.length === 0) {
     return (
       <div className="empty">
-        {topTitle ? <h2>{topTitle}</h2> : null}
+        {topTitle ? (
+          <PaperHeader title={topTitle} titleZh={paperTitleZh} authors={paperAuthors} lang={mode} />
+        ) : null}
         {note ? <p>{note}</p> : null}
       </div>
     );
@@ -60,15 +70,23 @@ export function SectionReader({
 
   return (
     <article className="prose paper-read">
-      {topTitle ? <h2>{topTitle}</h2> : null}
+      {topTitle ? (
+        <PaperHeader title={topTitle} titleZh={paperTitleZh} authors={paperAuthors} lang={mode} />
+      ) : null}
       {note ? <p className="lead">{note}</p> : null}
       {mode.showZh && translating ? (
-        <p className="translate-hint">正在按章节翻译，英文原文仍可阅读…</p>
+        <p className="translate-hint">
+          正在按章节翻译
+          {translateProgress ? `（${translateProgress.done}/${translateProgress.total}）` : ""}
+          ，长章节会逐段更新译文，英文原文仍可阅读…
+          {translateHint ? ` ${translateHint}` : ""}
+        </p>
       ) : null}
       {mode.showZh && translateError ? (
         <p className="translate-hint is-bad">{translateError}</p>
       ) : null}
       {sections.map((section) => {
+        const isFrontMatter = section.title.trim().toLowerCase() === "front matter";
         const zh = translations?.get(section.section_id);
         return (
           <section
@@ -87,7 +105,7 @@ export function SectionReader({
             <div className="section-read-head">
               <SectionTitle
                 title={section.title}
-                titleZh={zh?.title_zh}
+                titleZh={isFrontMatter ? undefined : zh?.title_zh}
                 showEn={mode.showEn}
                 showZh={mode.showZh}
               />
@@ -108,7 +126,7 @@ export function SectionReader({
               ) : (
                 <SectionBody
                   text={section.text}
-                  textZh={zh?.text_zh}
+                  textZh={isFrontMatter ? undefined : zh?.text_zh}
                   lang={mode}
                   figureIds={section.figure_ids}
                   figures={figures}
@@ -125,6 +143,35 @@ export function SectionReader({
   );
 }
 
+function PaperHeader({
+  title,
+  titleZh,
+  authors,
+  lang,
+}: {
+  title: string;
+  titleZh?: string | null;
+  authors?: string[];
+  lang: LangMode;
+}) {
+  const zh = usableZh(title, titleZh ?? undefined);
+  return (
+    <header className="paper-read-head">
+      {lang.showEn && lang.showZh && zh ? (
+        <h2>
+          {title}
+          <span className="text-zh"> {zh}</span>
+        </h2>
+      ) : lang.showZh && zh ? (
+        <h2>{zh}</h2>
+      ) : (
+        <h2>{title}</h2>
+      )}
+      {authors?.length ? <p className="paper-read-authors">{authors.join(" · ")}</p> : null}
+    </header>
+  );
+}
+
 function SectionTitle({
   title,
   titleZh,
@@ -136,15 +183,16 @@ function SectionTitle({
   showEn: boolean;
   showZh: boolean;
 }) {
-  if (showEn && showZh && titleZh) {
+  const zh = usableZh(title, titleZh);
+  if (showEn && showZh && zh) {
     return (
       <h3>
         {title}
-        <span className="text-zh"> {titleZh}</span>
+        <span className="text-zh"> {zh}</span>
       </h3>
     );
   }
-  if (showZh && titleZh) return <h3>{titleZh}</h3>;
+  if (showZh && zh) return <h3>{zh}</h3>;
   return <h3>{title}</h3>;
 }
 
@@ -170,6 +218,8 @@ function SectionBody({
   const byId = new Map(figures.map((figure) => [figure.figure_id, figure]));
   const { blocks, used } = attachFigures(splitProseAndTables(text), figures);
   const zhBlocks = textZh ? attachFigures(splitProseAndTables(textZh), figures).blocks : [];
+  const zhParagraphs = textZh ? splitParagraphs(textZh) : [];
+  let zhParaIndex = 0;
   const leftover = figureIds.filter((figureId) => {
     if (used.has(figureId)) return false;
     const figure = byId.get(figureId);
@@ -177,6 +227,13 @@ function SectionBody({
     return figure.kind !== "table_snapshot" && figure.kind !== "formula";
   });
   let zhCursor = 0;
+
+  const nextZhParagraph = () => {
+    if (zhParaIndex >= zhParagraphs.length) return undefined;
+    const paragraph = zhParagraphs[zhParaIndex];
+    zhParaIndex += 1;
+    return paragraph;
+  };
 
   const nextZh = (type: ProseBlock["type"]) => {
     while (zhCursor < zhBlocks.length) {
@@ -226,15 +283,19 @@ function SectionBody({
             />
           );
         }
-        const zhBlock = lang.showZh ? nextZh("text") : null;
-        const zhText = zhBlock?.type === "text" ? zhBlock.text : undefined;
+        const enParagraphs = splitParagraphs(block.text);
+        if (enParagraphs.length === 0) return null;
         return (
-          <BilingualText
-            key={`p-${index}`}
-            en={block.text}
-            zh={zhText}
-            lang={lang}
-          />
+          <div key={`p-${index}`} className="bilingual-paragraphs">
+            {enParagraphs.map((enPara, paraIndex) => (
+              <BilingualText
+                key={`p-${index}-${paraIndex}`}
+                en={enPara}
+                zh={lang.showZh ? nextZhParagraph() : undefined}
+                lang={lang}
+              />
+            ))}
+          </div>
         );
       })}
       {leftover.map((figureId) => {
@@ -254,6 +315,21 @@ function SectionBody({
   );
 }
 
+function usableZh(en: string | undefined, zh: string | undefined): string | undefined {
+  if (!zh || !zh.trim()) return undefined;
+  if (en && zh.trim() === en.trim()) return undefined;
+  // 没有汉字就不当作中文译文（失败回退 / 模型抄原文）
+  if (!/[\u4e00-\u9fff]/.test(zh)) return undefined;
+  return zh;
+}
+
+function splitParagraphs(text: string): string[] {
+  return text
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 function BilingualText({
   en,
   zh,
@@ -263,16 +339,32 @@ function BilingualText({
   zh?: string;
   lang: LangMode;
 }) {
-  if (lang.showEn && lang.showZh && zh) {
+  const zhText = usableZh(en, zh);
+  if (lang.showEn && lang.showZh && zhText) {
+    const enSegs = segmentByDisplayMath(en);
+    const zhSegs = segmentByDisplayMath(zhText);
+    const count = Math.max(enSegs.length, zhSegs.length);
     return (
-      <div className="bilingual-block">
-        <MathText text={en} />
-        <MathText text={zh} className="text-zh" />
+      <div className="bilingual-segments">
+        {Array.from({ length: count }, (_, index) => {
+          const enSeg = enSegs[index] ?? { prose: "", display: null };
+          const zhSeg = zhSegs[index] ?? { prose: "", display: null };
+          const segZh = usableZh(enSeg.prose, zhSeg.prose);
+          const display = enSeg.display ?? zhSeg.display;
+          if (!segZh && !enSeg.prose.trim() && !display) return null;
+          return (
+            <div key={index} className="bilingual-segment">
+              {enSeg.prose.trim() ? <MathText text={enSeg.prose} /> : null}
+              {segZh ? <MathText text={zhSeg.prose} className="text-zh" /> : null}
+              {display ? <MathDisplay value={display} /> : null}
+            </div>
+          );
+        })}
       </div>
     );
   }
-  if (lang.showZh && zh) return <MathText text={zh} className="text-zh" />;
-  if (lang.showEn) return <MathText text={en} />;
+  if (lang.showZh && zhText) return <MathText text={zhText} className="text-zh" />;
+  if (lang.showEn || (lang.showZh && !zhText)) return <MathText text={en} />;
   return null;
 }
 
@@ -286,7 +378,11 @@ function BilingualList({
   lang: LangMode;
 }) {
   const Tag = block.ordered ? "ol" : "ul";
-  if (lang.showEn && lang.showZh && zhBlock) {
+  const zhItems =
+    zhBlock?.items.map((item, index) => usableZh(block.items[index], item)).filter(Boolean) ?? [];
+  const hasZh = zhItems.length > 0 && zhBlock != null;
+
+  if (lang.showEn && lang.showZh && hasZh && zhBlock) {
     return (
       <div className="bilingual-block">
         <Tag className="section-list">
@@ -297,28 +393,31 @@ function BilingualList({
           ))}
         </Tag>
         <Tag className="section-list text-zh">
-          {zhBlock.items.map((item, itemIndex) => (
-            <li key={itemIndex}>
-              <MathText text={item} inline />
-            </li>
-          ))}
+          {zhBlock.items.map((item, itemIndex) => {
+            const zh = usableZh(block.items[itemIndex], item);
+            return (
+              <li key={itemIndex}>
+                <MathText text={zh || item} inline />
+              </li>
+            );
+          })}
         </Tag>
       </div>
     );
   }
-  if (lang.showZh && zhBlock) {
+  if (lang.showZh && hasZh && zhBlock) {
     const ZhTag = zhBlock.ordered ? "ol" : "ul";
     return (
       <ZhTag className="section-list text-zh">
         {zhBlock.items.map((item, itemIndex) => (
           <li key={itemIndex}>
-            <MathText text={item} inline />
+            <MathText text={usableZh(block.items[itemIndex], item) || item} inline />
           </li>
         ))}
       </ZhTag>
     );
   }
-  if (lang.showEn) {
+  if (lang.showEn || lang.showZh) {
     return (
       <Tag className="section-list">
         {block.items.map((item, itemIndex) => (
@@ -376,7 +475,14 @@ function BilingualTable({
     </figure>
   );
 
-  if (lang.showEn && lang.showZh && zhBlock) {
+  const zhUsable =
+    zhBlock &&
+    usableZh(
+      [block.caption, ...block.headers, ...block.rows.flat()].filter(Boolean).join("\n"),
+      [zhBlock.caption, ...zhBlock.headers, ...zhBlock.rows.flat()].filter(Boolean).join("\n"),
+    );
+
+  if (lang.showEn && lang.showZh && zhBlock && zhUsable) {
     return (
       <div className="bilingual-block">
         {renderTable(block.headers, block.rows, block.caption)}
@@ -384,10 +490,10 @@ function BilingualTable({
       </div>
     );
   }
-  if (lang.showZh && zhBlock) {
+  if (lang.showZh && zhBlock && zhUsable) {
     return renderTable(zhBlock.headers, zhBlock.rows, zhBlock.caption, "text-zh");
   }
-  if (lang.showEn) {
+  if (lang.showEn || lang.showZh) {
     return renderTable(block.headers, block.rows, block.caption);
   }
   return null;
@@ -412,10 +518,10 @@ function ReferencesBody({
           <span className="ref-n">[{index + 1}]</span>
           <span className="ref-body">
             {lang.showEn ? <MathText text={entry} inline cites={false} /> : null}
-            {lang.showZh && zhEntries[index] ? (
+            {lang.showZh && usableZh(entry, zhEntries[index]) ? (
               <MathText text={zhEntries[index]} inline cites={false} className="text-zh" />
             ) : lang.showZh && !lang.showEn ? (
-              <MathText text={entry} inline cites={false} className="text-zh" />
+              <MathText text={entry} inline cites={false} />
             ) : null}
           </span>
         </li>

@@ -99,19 +99,22 @@ export function getTranslations(paperId: string) {
 }
 
 export async function ensureTranslations(paperId: string): Promise<PaperTranslation> {
-  try {
-    return await startTranslations(paperId);
-  } catch (error) {
-    if (!(error instanceof HttpError && error.status === 202)) throw error;
+  let payload = await startTranslations(paperId);
+  if (payload.status === "ready" || payload.status === "partial") {
+    return payload;
   }
-  // 章节较多时串行翻译可能超过 6 分钟；放宽到约 15 分钟
+  if (payload.status === "failed") {
+    throw new Error("翻译失败，请检查 API Key / 模型名后重试");
+  }
+  // pending：轮询；已有章节先返回进度由调用方多次调用也可
   for (let attempt = 0; attempt < 300; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 3000));
-    try {
-      return await getTranslations(paperId);
-    } catch (error) {
-      if (error instanceof HttpError && error.status === 202) continue;
-      throw error;
+    payload = await getTranslations(paperId);
+    if (payload.status === "ready" || payload.status === "partial") {
+      return payload;
+    }
+    if (payload.status === "failed") {
+      throw new Error("翻译失败，请检查 API Key / 模型名后重试");
     }
   }
   throw new Error("翻译超时，请稍后重试");

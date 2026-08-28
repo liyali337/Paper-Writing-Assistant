@@ -214,6 +214,8 @@ export const demoMethod: MethodExplain = {
   prompt_version: "demo",
 };
 
+export const demoTitleZh = "HieraAlign：面向视觉语言模型的层次化跨模态对齐";
+
 export const demoTranslations: SectionTranslation[] = [
   {
     section_id: "sec-abstract",

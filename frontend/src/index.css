@@ -577,6 +577,30 @@ button {
   margin-top: 0.35em;
 }
 
+.bilingual-segments {
+  margin: 0 0 1em;
+}
+
+.bilingual-paragraphs .bilingual-segments:last-child {
+  margin-bottom: 0;
+}
+
+.bilingual-segment + .bilingual-segment {
+  margin-top: 0.75em;
+}
+
+.bilingual-segment .text-zh {
+  margin-top: 0.35em;
+}
+
+.bilingual-segment .text-zh + .math-display {
+  margin-top: 0.35em;
+}
+
+.bilingual-segment .math-display {
+  margin: 0.45em 0 0;
+}
+
 .text-zh {
   color: var(--muted);
 }
@@ -624,6 +648,21 @@ button {
 
 .paper-read {
   max-width: 46em;
+}
+
+.paper-read-head {
+  margin: 0 0 28px;
+}
+
+.paper-read-head h2 {
+  margin: 0 0 8px;
+}
+
+.paper-read-authors {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .section-read {

@@ -30,6 +30,38 @@ function mergeOrphanAccents(text: string): string {
   );
 }
 
+export type DisplaySegment = { prose: string; display: string | null };
+
+/** 按独立公式（$$…$$）切段，便于中英对照时「原文 → 译文 → 公式」。 */
+export function segmentByDisplayMath(text: string): DisplaySegment[] {
+  const pieces = splitMath(mergeOrphanAccents(text));
+  const segments: DisplaySegment[] = [];
+  let prose = "";
+
+  const push = (display: string | null) => {
+    segments.push({ prose, display });
+    prose = "";
+  };
+
+  for (const piece of pieces) {
+    if (piece.type === "display") {
+      push(piece.value);
+    } else if (piece.type === "inline") {
+      prose += `$${piece.value}$`;
+    } else {
+      prose += piece.value;
+    }
+  }
+  if (prose.trim() || segments.length === 0) {
+    push(null);
+  }
+  return segments;
+}
+
+export function MathDisplay({ value }: { value: string }) {
+  return <RenderedMath value={value} display />;
+}
+
 export function MathText({
   text,
   inline = false,

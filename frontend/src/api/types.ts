@@ -126,6 +126,9 @@ export type SectionTranslation = {
   section_id: string;
   title_zh: string;
   text_zh: string;
+  partial?: boolean;
+  chunks_done?: number;
+  chunks_total?: number;
 };
 
 export type PaperTranslation = {
@@ -133,7 +136,9 @@ export type PaperTranslation = {
   status: ExplainStatus;
   model: string;
   prompt_version: string;
+  title_zh?: string | null;
   sections: SectionTranslation[];
+  error?: string | null;
 };
 
 export class HttpError extends Error {
