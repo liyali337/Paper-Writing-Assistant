@@ -61,6 +61,149 @@ def looks_like_latex(text: str | None) -> bool:
     return False
 
 
+_DOUBLE_SUP = re.compile(r"\^(?:\{[^{}]*\}|[A-Za-z0-9])\s*\^")
+_DOUBLE_SUB = re.compile(r"_(?:\{[^{}]*\}|[A-Za-z0-9])\s*_")
+_CMD_TOKEN = re.compile(r"\\([A-Za-z]+)")
+_TRAILING_OP = re.compile(r"\\(?:in|sum|prod|int|oplus|otimes)\s*$")
+_RAW_MATH_CHARS = set("⊕⊗⊖⊙∘⋅×∈∉⊂⊃∪∩≤≥≠≈→↔∞∑∏∫")
+_GLUED_HEADS = frozenset(
+    {
+        "times",
+        "cdot",
+        "oplus",
+        "otimes",
+        "ominus",
+        "cap",
+        "cup",
+        "in",
+        "notin",
+        "subset",
+        "subseteq",
+        "leq",
+        "geq",
+        "neq",
+        "approx",
+        "pm",
+        "to",
+        "rightarrow",
+        "leftarrow",
+        "infty",
+        "sum",
+        "prod",
+        "int",
+        "mathbb",
+        "mathcal",
+        "mathrm",
+        "mathbf",
+        "mathit",
+        "operatorname",
+        "text",
+        "textbf",
+        "textrm",
+        "textit",
+    }
+)
+
+
+def is_renderable_latex(text: str | None) -> bool:
+    """粗判能否过 KaTeX；过不了的交给视觉重识别。"""
+    blob = normalize_latex(text)
+    if not blob or is_garbled_math(blob) or is_eq_number(blob):
+        return False
+    if not looks_like_latex(blob):
+        return False
+    if blob.count("{") != blob.count("}"):
+        return False
+    if not _braces_balanced(blob):
+        return False
+    if _DOUBLE_SUP.search(blob) or _DOUBLE_SUB.search(blob):
+        return False
+    if _has_glued_cmd(blob) or _TRAILING_OP.search(blob):
+        return False
+    if blob[:1] in "^_" or any(char in _RAW_MATH_CHARS for char in blob):
+        return False
+    if any(0x2200 <= ord(char) <= 0x22FF for char in blob):
+        return False
+    return True
+
+
+def latex_needs_vision(text: str | None) -> bool:
+    if not is_renderable_latex(text):
+        return True
+    return latex_looks_incomplete(text)
+
+
+_IDENT_TOKEN = re.compile(
+    r"[A-Za-z](?:_\{[^{}]+\}|_[A-Za-z0-9]+)?(?:\^\{[^{}]+\}|\^[A-Za-z0-9']+)?"
+)
+_BINOP = re.compile(r"(?<![A-Za-z])\+|\\times|\\cdot|\\oplus|\\otimes|\\pm")
+
+
+def latex_looks_incomplete(text: str | None) -> bool:
+    """KaTeX 能渲染、但运算符/括号已丢的残式，例如 L_g L_{CE} L_{Tri}。"""
+    blob = normalize_latex(text)
+    if not blob:
+        return True
+    idents = _IDENT_TOKEN.findall(blob)
+    has_eq = "=" in blob
+    has_op = bool(_BINOP.search(blob))
+    has_paren = "(" in blob or r"\left" in blob
+    has_set = r"\{" in blob
+    has_in = r"\in" in blob
+    if len(idents) >= 3 and not has_eq and not has_op and not has_in and not has_paren:
+        return True
+    if has_eq and len(idents) >= 3 and not has_op and not has_paren and not has_set:
+        return True
+    if len(re.findall(r"(?<![A-Za-z])L[_^]", blob)) >= 2 and not has_op and not has_eq:
+        return True
+    return False
+
+
+def latex_score(text: str | None) -> int:
+    blob = normalize_latex(text)
+    return (
+        blob.count("=") * 3
+        + blob.count("+")
+        + blob.count("(")
+        + blob.count(")")
+        + blob.count(r"\mathcal") * 2
+        + blob.count(r"\mathbb") * 2
+        + blob.count(r"\in")
+        + blob.count(r"\times")
+        + blob.count(r"\oplus")
+        + blob.count(r"\tag")
+    )
+
+
+def _has_glued_cmd(blob: str) -> bool:
+    for match in _CMD_TOKEN.finditer(blob):
+        name = match.group(1)
+        if name in _GLUED_HEADS:
+            continue
+        for size in range(len(name) - 1, 0, -1):
+            if name[:size] in _GLUED_HEADS:
+                return True
+    return False
+
+
+def _braces_balanced(blob: str) -> bool:
+    depth = 0
+    index = 0
+    while index < len(blob):
+        char = blob[index]
+        if char == "\\" and index + 1 < len(blob) and blob[index + 1] in "{}":
+            index += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+        index += 1
+    return depth == 0
+
+
 def is_eq_number(text: str | None) -> bool:
     return bool(_EQ_NUMBER.match((text or "").strip()))
 

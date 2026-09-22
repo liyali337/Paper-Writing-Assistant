@@ -12,6 +12,7 @@ from dl_agent.knowledge.classify import (
     is_plausible_heading,
     is_references_heading,
     is_skip_heading,
+    looks_like_paper_title_heading,
     parse_caption,
     strip_page_chrome,
 )
@@ -163,7 +164,7 @@ def assemble(
                 and not numbered
                 and item.page == 1
                 and not sections
-                and classify_kind(title) == "other"
+                and looks_like_paper_title_heading(title)
             ):
                 derived_title = derived_title or title
                 continue
@@ -262,6 +263,7 @@ def assemble(
 
     sections, figures, pngs = apply_figure_dedupe(sections, figures, pngs)
     sections, figures, pngs = polish_formulas(sections, figures, pngs)
+    sections = repair_front_matter(collapse_false_headings(sections))
 
     abstract = None
     for section in sections:
@@ -274,7 +276,7 @@ def assemble(
             abstract = joined
 
     return AssembleResult(
-        sections=collapse_false_headings(sections),
+        sections=sections,
         figures=figures,
         figure_pngs=pngs,
         title=derived_title,
@@ -479,8 +481,130 @@ _TRIPLE = re.compile(r"\b([A-Za-z])\s+([A-Za-z0-9]+)\s+([A-Za-z])\b")
 _NAMED_TRIPLE = re.compile(r"\b([A-Z][A-Za-z]{2,})\s+([A-Z])\s+([a-z])\b")
 _WS_SCRIPT = re.compile(r"(?<![A-Za-z\\])([WFTX])([SPRNIT])_\{?([A-Za-z0-9]+)\}?")
 _REAL_SPACE = re.compile(r"(?<![A-Za-z\\])R([A-Z])\s*(?:\\times|×)\s*([A-Z])")
+_REAL_DIM = re.compile(
+    r"(?<!mathbb\{)(?<![A-Za-z\\])R(\d+)\s*(?:\\times|×)\s*"
+    r"([A-Za-z](?:_\{[^{}]+\}|_[A-Za-z0-9]+)?)"
+)
+_LOG_STACKED_FRAC = re.compile(
+    r"(?:\\log|\blog)\s*\(\s*([A-Za-z])_\1\^1\s*0\s*\)"
+)
+_DELTA_LOG_FRAC = re.compile(
+    r"(?<![$])(?:([Δδ]|\\Delta)\s*=\s*)?(?:\\log|\blog)\s*\(\s*([A-Za-z])_\2\^1\s*0\s*\)"
+)
+_BARE_ASSIGN = re.compile(
+    r"(?<![$\\])("
+    r"[A-Za-z]"
+    r"(?:_\{[^{}]{2,}\}|\^\{\{?[^{}]+\}\}?){1,6}"
+    r"\s*=\s*"
+    r"[^\n$]{8,240}"
+    r")",
+    re.M,
+)
+_GREEK_LATEX = {
+    "α": r"\alpha ",
+    "β": r"\beta ",
+    "γ": r"\gamma ",
+    "δ": r"\delta ",
+    "Δ": r"\Delta ",
+    "θ": r"\theta ",
+    "λ": r"\lambda ",
+    "μ": r"\mu ",
+    "π": r"\pi ",
+    "σ": r"\sigma ",
+    "φ": r"\phi ",
+    "ω": r"\omega ",
+    "⊕": r"\oplus ",
+}
+_PROSE_REAL_DIM = re.compile(
+    r"(?<![$\\])(?:([A-Za-z](?:_\{[^{}]+\}|_[A-Za-z0-9]+)?)\s*)?"
+    r"(∈|\\in)\s*R(\d+)\s*(?:×|\\times)\s*"
+    r"([A-Za-z](?:_\{[^{}]+\}|_[A-Za-z0-9]+)?)"
+)
+_REAL_BASE = r"(?:\\mathbb\{R\}|ℝ|(?<!mathbb\{)(?<![A-Za-z\\])R)"
+_STRAY_REAL_SUB_BRACED = re.compile(
+    _REAL_BASE + r"_\{([A-Za-z])\}\^\s*\{([^{}]*?(?:\\times|×)\s*)([A-Za-z])\}"
+)
+_STRAY_REAL_SUB_BARE = re.compile(
+    _REAL_BASE + r"_([A-Za-z])\^\s*\{([^{}]*?(?:\\times|×)\s*)([A-Za-z])\}"
+)
+_STRAY_REAL_TRAIL_BRACED = re.compile(
+    _REAL_BASE + r"\^\s*\{([^{}]*?(?:\\times|×)\s*)([A-Za-z])\}_\{([A-Za-z])\}"
+)
+_STRAY_REAL_TRAIL_BARE = re.compile(
+    _REAL_BASE + r"\^\s*\{([^{}]*?(?:\\times|×)\s*)([A-Za-z])\}_([A-Za-z])(?![A-Za-z0-9{])"
+)
+_GLUED_TENSOR = re.compile(
+    r"(?<![A-Za-z\\])([QFHWXZPK])([A-Z])([A-Z])\s*(?:\\in|∈)\s*"
+    r"(?:\\mathbb\{R\}|ℝ)"
+    r"(?=(?:_\{?[A-Za-z]\}?)?\s*\^\{[^{}]{0,80}(?:\\times|×))"
+)
+_GLUED_TENSOR_SKIP = frozenset(
+    {
+        "RNN",
+        "CNN",
+        "GAN",
+        "MLP",
+        "SVD",
+        "PCA",
+        "RGB",
+        "NLP",
+        "NMS",
+        "ROI",
+        "FPS",
+        "GPU",
+        "CPU",
+        "BERT",
+        "LSTM",
+        "VAE",
+        "GNN",
+        "ViT",
+    }
+)
+_ATTENTION_TRIO = frozenset("QKV")
 _SPACE_PUNCT = re.compile(r"\s+([,;:.)\]}])")
 _OPEN_SPACE = re.compile(r"([(\[{])\s+")
+
+
+def _should_unglue_tensor(token: str) -> bool:
+    blob = token.upper()
+    if len(blob) != 3 or not blob.isalpha():
+        return False
+    if blob in _GLUED_TENSOR_SKIP or blob[0] not in "QFHWXZPK":
+        return False
+    return not set(blob) <= _ATTENTION_TRIO
+
+
+def _real_shape(prefix: str, last: str, sub: str) -> str:
+    prefix = prefix.replace("×", r"\times ")
+    script = f"_{sub}" if len(sub) == 1 else f"_{{{sub}}}"
+    return rf"\mathbb{{R}}^{{{prefix}{last}{script}}}"
+
+
+def _repair_tensor_shapes(text: str) -> str:
+    """把 QVT∈ℝ_v^{B×C} 收成 Q_T^V ∈ ℝ^{B×C_v}。"""
+    if not text:
+        return text
+    cleaned = text.replace("ℝ", r"\mathbb{R}")
+    cleaned = _STRAY_REAL_SUB_BRACED.sub(
+        lambda m: _real_shape(m.group(2), m.group(3), m.group(1)), cleaned
+    )
+    cleaned = _STRAY_REAL_SUB_BARE.sub(
+        lambda m: _real_shape(m.group(2), m.group(3), m.group(1)), cleaned
+    )
+    cleaned = _STRAY_REAL_TRAIL_BRACED.sub(
+        lambda m: _real_shape(m.group(1), m.group(2), m.group(3)), cleaned
+    )
+    cleaned = _STRAY_REAL_TRAIL_BARE.sub(
+        lambda m: _real_shape(m.group(1), m.group(2), m.group(3)), cleaned
+    )
+
+    def unglue(match: re.Match[str]) -> str:
+        token = match.group(1) + match.group(2) + match.group(3)
+        if not _should_unglue_tensor(token):
+            return match.group(0)
+        return rf"{match.group(1)}_{{{match.group(3)}}}^{{{match.group(2)}}} \in \mathbb{{R}}"
+
+    return _GLUED_TENSOR.sub(unglue, cleaned)
 
 
 def tidy_math_prose(text: str) -> str:
@@ -505,8 +629,108 @@ def tidy_math_prose(text: str) -> str:
             rebuilt.append(_tidy_text_segment(body))
     out = _join_math_pieces(rebuilt)
     out = _wrap_bare_inline_math(out)
+    out = _collapse_shattered_formulas(out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
+
+
+_COND_AFTER_MATH = re.compile(
+    r"\$([^$\n]{1,80})\$\s*([|∣]\s*[A-Za-z][A-Za-z0-9]*)([)）]?)"
+)
+
+
+def _strip_stray_dollar_after_word(text: str) -> str:
+    """去掉 p$ neg 这种把后半句切进数学体的多余 $。"""
+    out: list[str] = []
+    dollars = 0
+    index = 0
+    length = len(text)
+    while index < length:
+        if text.startswith("$$", index):
+            close = text.find("$$", index + 2)
+            if close < 0:
+                out.append(text[index:])
+                break
+            out.append(text[index : close + 2])
+            dollars = 0
+            index = close + 2
+            continue
+        char = text[index]
+        if char == "$":
+            if dollars % 2 == 0 and index > 0 and text[index - 1].isalpha():
+                rest = text[index + 1 : index + 8]
+                if re.match(r"\s+[\u4e00-\u9fffA-Za-z]", rest):
+                    index += 1
+                    continue
+            dollars += 1
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _absorb_trailing_condition(text: str) -> str:
+    """把 $F_j$|T) 收成 $F_j | T$，避免 |T) 掉到下一段。"""
+
+    def absorb(match: re.Match[str]) -> str:
+        body = match.group(1).rstrip()
+        if "|" in body or "\\mid" in body:
+            return match.group(0)
+        cond = re.sub(r"\s+", "", match.group(2).replace("∣", "|"))
+        return f"${body} {cond}${match.group(3)}"
+
+    return _COND_AFTER_MATH.sub(absorb, text)
+
+
+def tidy_translation_math(text: str) -> str:
+    """整理译文里已有的 $ / $$，不要按 PDF 抽字去包新的独立公式。"""
+    if not text:
+        return text
+    text = _strip_stray_dollar_after_word(text)
+    text = _absorb_trailing_condition(text)
+    rebuilt: list[str] = []
+    for kind, body in _split_math_segments(text):
+        if kind == "display":
+            math, prose = _peel_math_prose(body)
+            cleaned = _sanitize_math_body(math or body)
+            rebuilt.append(f"$$\n{cleaned}\n$$" if cleaned else "")
+            if prose:
+                rebuilt.append(("" if rebuilt[-1].endswith("\n") else " ") + _wrap_bare_zh_math(prose))
+        elif kind == "inline":
+            if re.search(r"[\u4e00-\u9fff]", body):
+                rebuilt.append(_wrap_bare_zh_math(body))
+                continue
+            cleaned = _sanitize_math_body(body)
+            rebuilt.append(f"${cleaned}$" if cleaned else "")
+        else:
+            rebuilt.append(_wrap_bare_zh_math(body))
+    return "".join(rebuilt)
+
+
+_BARE_ZH_MATH = re.compile(
+    r"(?<![$\\])("
+    r"(?:[A-Za-z]\s+)?\\in\s*\\\{(?:[^{}]|\{[^{}]{0,40}\})*\\\}"
+    r"|\\frac\{[^{}]{1,40}\}\{[^{}]{1,40}\}"
+    r"|\([A-Za-z](?:[_^](?:\{(?:[^{}]|\{[^{}]{0,40}\})+\}|[A-Za-z0-9]+))"
+    r"(?:,\s*[A-Za-z](?:[_^](?:\{(?:[^{}]|\{[^{}]{0,40}\})+\}|[A-Za-z0-9]+)))+\)"
+    r"|[A-Za-z](?:[_^](?:\{(?:[^{}]|\{[^{}]{0,40}\})+\}|[A-Za-z0-9'\\]+))+"
+    r"|\\\{(?:[^{}]|\{[^{}]{0,40}\})*\\\}"
+    r"|\\[A-Za-z]+(?:\s*\{[^{}]{0,80}\})+(?:[_^](?:\{[^{}]{0,40}\}|[A-Za-z0-9]+))*"
+    r"|\\(?:in|cdot|times|mid|oplus|otimes|leq|geq|neq|pm|infty|ldots|dots)(?![A-Za-z])"
+    r")"
+)
+
+
+def _wrap_bare_zh_math(text: str) -> str:
+    """译文正文里的裸 LaTeX 包进 $，已在 $...$ 里的不要再包。"""
+    if not text:
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        if _in_math_span(match.string, match.start()):
+            return match.group(0)
+        return f"${match.group(1)}$"
+
+    return _BARE_ZH_MATH.sub(repl, text)
 
 
 _WORD_EMBEDDED_MATH = re.compile(
@@ -567,6 +791,22 @@ def _split_math_segments(text: str) -> list[tuple[str, str]]:
             break
         return pos
 
+    def skip_empty_trailers(pos: int) -> int:
+        while pos < length:
+            cursor = pos
+            while cursor < length and text[cursor] in " \t\n":
+                cursor += 1
+            if not text.startswith("$$", cursor):
+                break
+            nxt = cursor + 2
+            while nxt < length and text[nxt] in " \t\n":
+                nxt += 1
+            if nxt >= length or text.startswith("$$", nxt):
+                pos = cursor + 2
+                continue
+            break
+        return pos
+
     while index < length:
         if text.startswith("\\$", index):
             buf.append("\\$")
@@ -604,7 +844,7 @@ def _split_math_segments(text: str) -> list[tuple[str, str]]:
                 break
             flush_text()
             out.append(("display", text[start:close]))
-            index = skip_extra_dollars(close + 2)
+            index = skip_empty_trailers(close + 2)
             continue
         if text[index] == "$":
             close = text.find("$", index + 1)
@@ -619,14 +859,80 @@ def _split_math_segments(text: str) -> list[tuple[str, str]]:
     return out or [("text", text)]
 
 
+_LEAD_DICT_TERM = re.compile(
+    r"(?<![A-Za-z0-9])(?:\{\})?_\{([A-Za-z0-9]+)\}\s*([A-Za-z])_\{([A-Za-z0-9]+)\}"
+)
+_DOUBLE_SUP = re.compile(
+    r"([A-Za-z](?:_\{[^{}]+\}|_[A-Za-z0-9]+)?\s*\^\{[^{}]+\})\s+\^\{([^{}]+)\}"
+)
+_ORPHAN_SUP = re.compile(r"(^|,\s*)(?:\{\})?\^\{([^{}]+)\}")
+
+
+def _repair_pdf_script_artifacts(body: str) -> str:
+    """PDF 丢掉矩阵字母后会留下 _{r}h_{r}、z^{v} ^{Qv}，KaTeX 无法解析。"""
+    cleaned = (body or "").replace("\\ ", " ")
+    cleaned = _DOUBLE_SUP.sub(r"\1 W^{\2}", cleaned)
+    cleaned = _ORPHAN_SUP.sub(r"\1 W^{\2}", cleaned)
+    cleaned = _repair_leading_dict_terms(cleaned)
+    cleaned = re.sub(r"=([A-Za-z])", r"= \1", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
+
+
+def _repair_leading_dict_terms(body: str) -> str:
+    if not _LEAD_DICT_TERM.search(body):
+        return body
+
+    def repair_row(row: str) -> str:
+        dict_letter: str | None = None
+
+        def repl(match: re.Match[str]) -> str:
+            nonlocal dict_letter
+            sub, base, hsub = match.group(1), match.group(2), match.group(3)
+            if dict_letter is None:
+                dict_letter = sub[0].upper()
+            return rf"{dict_letter}_{{{sub}}} {base}_{{{hsub}}}"
+
+        out = _LEAD_DICT_TERM.sub(repl, row)
+        return re.sub(r"([a-z]_\{[^{}]+\})\s+([A-Z]_\{)", r"\1 + \2", out)
+
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for char in body:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        if char == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+            continue
+        buf.append(char)
+    parts.append("".join(buf))
+    hits = sum(1 for part in parts if _LEAD_DICT_TERM.search(part))
+    if hits >= 2:
+        return ", ".join(repair_row(part.strip()) for part in parts if part.strip())
+    return repair_row(body)
+
+
 def _sanitize_math_body(body: str) -> str:
     cleaned = _CMD_SPACE.sub(r"\\\1{", body.replace("$", "").replace("\ufffd", ""))
+    for char, latex in _GREEK_LATEX.items():
+        cleaned = cleaned.replace(char, latex)
     cleaned = re.sub(r"([_^])\{([^{}\\]*)\\\}", r"\1{\2}", cleaned)
     cleaned = _LEAKED_SUB.sub(r"\1_\2 \3", cleaned)
     cleaned = re.sub(r"(?<!mathbb\{)(?<![A-Za-z\\])R\^\{", r"\\mathbb{R}^{", cleaned)
     cleaned = _WS_SCRIPT.sub(r"\1^{\2}_{\3}", cleaned)
+    cleaned = _REAL_DIM.sub(r"\\mathbb{R}^{\1 \\times \2}", cleaned)
     cleaned = _REAL_SPACE.sub(r"\\mathbb{R}^{\1 \\times \2}", cleaned)
+    cleaned = _LOG_STACKED_FRAC.sub(r"\\log(\\frac{\1_1}{\1_0})", cleaned)
     cleaned = re.sub(r"(\}_{[A-Za-z0-9]+}),(?=[A-Z])", r"\1, ", cleaned)
+    cleaned = re.sub(r"\\times(?=[A-Za-z])", r"\\times ", cleaned)
+    cleaned = re.sub(r"(\\[A-Za-z]+)\s+([_^])", r"\1\2", cleaned)
+    cleaned = re.sub(r"\^\{\{([^{}]+)\}\}", r"^{\1}", cleaned)
+    cleaned = _repair_tensor_shapes(cleaned)
+    cleaned = _repair_pdf_script_artifacts(cleaned)
     if cleaned.endswith(".") and not cleaned.endswith(r"\ldots"):
         cleaned = cleaned[:-1]
     if "\\begin{" not in cleaned:
@@ -647,6 +953,12 @@ def _keep_as_display(body: str) -> bool:
     blob = body.strip()
     if not blob or is_garbled_math(blob) or not looks_like_latex(blob):
         return False
+    if re.match(r"^[)）\]|,，、;；]", blob):
+        return False
+    if re.match(r"^\\?\|[A-Za-z]{1,8}\\?\)$", blob.replace(" ", "")):
+        return False
+    if re.match(r"^[A-Za-z]{1,4}:\s*", blob):
+        return False
     if blob.count("{") != blob.count("}"):
         return False
     plain = re.sub(r"\\(?:mathrm|text|operatorname|mathbf|mathit)\{[^{}]*\}", "", blob)
@@ -655,14 +967,70 @@ def _keep_as_display(body: str) -> bool:
         return False
     if "=" in blob:
         return True
+    if "+" in blob and re.search(r"[_^]", blob):
+        return True
     return bool("\\{" in blob or re.search(r"\\[A-Za-z]{2,}", blob))
 
 
+_PROSE_SPLIT = re.compile(
+    r"(?i)(?<![\\$])\s+(where|denotes?|represents?|indicates?|indexes|is the|are the)\b"
+)
+_TAG_THEN_PROSE = re.compile(r"(\\tag\{[^}]+\})\s+(?=[A-Za-z]{3,})")
+_TAG_THEN_ZH = re.compile(r"(\\tag\{[^}]+\})\s*(?=其中(?!的)|式中)")
+_ZH_WHERE_SPLIT = re.compile(r"(?<![\\$])\s+(其中(?!的)|式中)")
+
+
+def _peel_math_prose(body: str) -> tuple[str, str]:
+    """公式后粘了英文/「其中」时拆开，避免 where / 其中 把 $$ 整段毁掉。"""
+    blob = (body or "").strip()
+    if not blob:
+        return "", ""
+    tagged_zh = _TAG_THEN_ZH.search(blob)
+    if tagged_zh:
+        return blob[: tagged_zh.end(1)].strip(), blob[tagged_zh.end() :].strip()
+    tagged = _TAG_THEN_PROSE.search(blob)
+    if tagged:
+        return blob[: tagged.end(1)].strip(), blob[tagged.end() :].strip()
+    zh_split = _ZH_WHERE_SPLIT.search(blob)
+    if zh_split and zh_split.start() > 6:
+        from dl_agent.knowledge.formula_latex import looks_like_latex
+
+        left = blob[: zh_split.start()].strip()
+        right = blob[zh_split.start() :].strip()
+        if looks_like_latex(left) or "=" in left:
+            return left, right
+    split = _PROSE_SPLIT.search(blob)
+    if split and split.start() > 6:
+        from dl_agent.knowledge.formula_latex import looks_like_latex
+
+        left = blob[: split.start()].strip()
+        right = blob[split.start() :].strip()
+        if looks_like_latex(left):
+            return left, right
+    return blob, ""
+
+
 def _emit_display(body: str) -> str:
+    from dl_agent.knowledge.formula_latex import looks_like_latex
+
     cleaned = _with_eq_tag(_sanitize_math_body(body))
     if not cleaned:
         return "\n"
-    if _keep_as_display(cleaned):
+    math, prose = _peel_math_prose(cleaned)
+    math = _with_eq_tag(_sanitize_math_body(math)) if math else ""
+    can_display = bool(math) and (
+        _keep_as_display(math) or (bool(prose) and looks_like_latex(math))
+    )
+    if can_display:
+        out = f"\n$$\n{math}\n$$\n"
+        if prose:
+            out += prose.strip() + "\n"
+        return out
+    if math and looks_like_latex(math):
+        plain = re.sub(r"\\[A-Za-z]+", "", math)
+        if not re.search(r"\b[A-Za-z]{5,}\b", plain):
+            return f"\n$$\n{math}\n$$\n"
+    if _looks_like_assignment(cleaned) or _display_looks_continuation(cleaned):
         return f"\n$$\n{cleaned}\n$$\n"
     if len(re.sub(r"\s+", "", cleaned)) > 24:
         return "\n" + cleaned + "\n"
@@ -676,6 +1044,145 @@ def _emit_inline(body: str) -> str:
     if _is_junk_inline(cleaned):
         return ""
     return f"${cleaned}$." if trailing_dot else f"${cleaned}$"
+
+
+_OP_INLINE = re.compile(
+    r"^(?:\\(?:times|cdot|leq|geq|in|oplus|otimes|pm)|[×·⋅≤≥∈⊕]|"
+    r"\\tag\{[^}]+\})$"
+)
+_SINGLE_SYM = re.compile(r"^[A-Za-z](?:[_^]\{[^{}]+\})?$")
+
+
+def _is_operator_inline(blob: str) -> bool:
+    cleaned = _sanitize_math_body(blob)
+    return bool(_OP_INLINE.match(cleaned.replace(" ", "")) or _OP_INLINE.match(cleaned))
+
+
+def _display_looks_truncated(body: str) -> bool:
+    blob = _sanitize_math_body(body)
+    return bool(re.search(r"(?:\\in|∈|=)\s*$", blob))
+
+
+def _display_looks_continuation(body: str) -> bool:
+    blob = _sanitize_math_body(body)
+    return bool(re.match(r"(?:\\in|∈)", blob))
+
+
+def _is_shattered_piece(kind: str, body: str, *, in_run: bool) -> bool:
+    blob = body.strip()
+    if not blob:
+        return in_run
+    if kind == "display":
+        cleaned = _sanitize_math_body(blob)
+        if _keep_as_display(cleaned):
+            return in_run and (
+                _display_looks_truncated(cleaned) or _display_looks_continuation(cleaned)
+            )
+        from dl_agent.knowledge.formula_latex import looks_like_latex
+
+        return looks_like_latex(cleaned) or r"\tag" in cleaned or _display_looks_continuation(cleaned)
+    if kind == "inline":
+        cleaned = _sanitize_math_body(blob)
+        if r"\tag" in cleaned:
+            return True
+        if _is_operator_inline(cleaned):
+            return True
+        if in_run and r"\mathbb" in cleaned:
+            return True
+        if in_run and re.fullmatch(r"\([^)]{1,48}\)", cleaned.replace(" ", "")):
+            return True
+        if in_run and (_SINGLE_SYM.match(cleaned) or len(cleaned) <= 24 and re.search(r"[_^\\]", cleaned)):
+            return True
+        return False
+    if re.search(r"\\(?:tag|mathbb)|[_^]\{", blob):
+        return True
+    if in_run and re.fullmatch(r"[,;:.\s]+", blob):
+        return True
+    if in_run and len(blob) < 16 and re.search(r"[_^\\()]", blob):
+        return True
+    return False
+
+
+def _is_shattered_start(kind: str, body: str) -> bool:
+    blob = body.strip()
+    if kind == "display":
+        cleaned = _sanitize_math_body(blob)
+        if _display_looks_truncated(blob) or _display_looks_continuation(cleaned):
+            return True
+        if "=" in cleaned and not (r"\in" in cleaned or "∈" in cleaned):
+            return True
+        return not _keep_as_display(cleaned) and (
+            "\\tag" in blob or "\\mathbb" in blob or "=" in blob
+        )
+    if kind == "inline":
+        cleaned = _sanitize_math_body(blob)
+        return r"\tag" in cleaned or _is_operator_inline(cleaned)
+    return bool(re.search(r"\\(?:tag|mathbb)", blob) or _looks_like_assignment(blob))
+
+
+def _looks_like_assignment(blob: str) -> bool:
+    """赋值式，含 F_{out}^{{(l)}}= 这种双层括号。"""
+    cleaned = _sanitize_math_body(blob)
+    match = re.search(r"[A-Za-z](?:_\{[^{}]+\}|\^\{[^{}]+\})+\s*=", cleaned)
+    if not match:
+        return False
+    head = cleaned[: match.start()].strip()
+    return len(head) < 8
+
+
+def _collapse_shattered_formulas(text: str) -> str:
+    """把被拆成 × / ≤ / \\tag 碎片的展示公式重新收成一块。"""
+    if not text:
+        return text
+    segs = _split_math_segments(text)
+    rebuilt: list[str] = []
+    index = 0
+    while index < len(segs):
+        kind, body = segs[index]
+        if not _is_shattered_start(kind, body):
+            rebuilt.append(_emit_segment(kind, body))
+            index += 1
+            continue
+        chunks = [(kind, body)]
+        cursor = index + 1
+        while cursor < len(segs) and _is_shattered_piece(*segs[cursor], in_run=True):
+            nxt_kind, nxt_body = segs[cursor]
+            if (
+                nxt_kind == "display"
+                and _keep_as_display(_sanitize_math_body(nxt_body))
+                and not _display_looks_truncated(nxt_body)
+                and not _display_looks_continuation(nxt_body)
+            ):
+                break
+            chunks.append((nxt_kind, nxt_body))
+            cursor += 1
+        if len(chunks) == 1 and kind == "display" and _keep_as_display(_sanitize_math_body(body)):
+            rebuilt.append(_emit_display(body))
+            index += 1
+            continue
+        combined = " ".join(_sanitize_math_body(part) for _, part in chunks)
+        math, prose = _peel_math_prose(combined)
+        from dl_agent.knowledge.formula_latex import looks_like_latex
+
+        if math and looks_like_latex(math) and (
+            "=" in math or r"\in" in math or r"\tag" in math or "∈" in math
+        ):
+            rebuilt.append(_emit_display(math))
+            if prose:
+                rebuilt.append(prose.strip() + "\n")
+        else:
+            for piece_kind, piece_body in chunks:
+                rebuilt.append(_emit_segment(piece_kind, piece_body))
+        index = cursor
+    return _join_math_pieces(rebuilt)
+
+
+def _emit_segment(kind: str, body: str) -> str:
+    if kind == "display":
+        return _emit_display(body)
+    if kind == "inline":
+        return _emit_inline(body)
+    return body
 
 
 def _unwrap_word_math(match: re.Match[str]) -> str:
@@ -719,6 +1226,7 @@ _BARE_TEX_SYMBOL = re.compile(
     r"iota|kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma|tau|"
     r"upsilon|phi|varphi|chi|psi|omega|ell|infty|times|cdot|in|leq|geq|"
     r"neq|pm|cap|cup|circ|odot)"
+    r"(?:[_^](?:\{[^{}]+\}|[A-Za-z0-9]+))*"
     r")(?![A-Za-z])"
 )
 _K_FLOOR = re.compile(
@@ -734,7 +1242,13 @@ _SPACED_SUB = re.compile(r"\b([A-Z])\s+([a-z])\b")
 _LEAKED_SUB = re.compile(
     r"([A-Za-z])\}([a-z]{1,4})\s*\^\{((?:\\times|\\cdot|\\otimes)\s*)"
 )
+_LOSS_CAL = re.compile(r"(?<![$\\])\bL(?:CE|Tri|\s+Tri|\s+C(?![A-Za-z]))\b")
 _ENGLISH_CAPS = {"A", "I"}
+
+
+def _replace_loss_cal(match: re.Match[str]) -> str:
+    name = re.sub(r"\s+", "", match.group(0))[1:]
+    return rf"$\mathcal{{L}}_{{{name}}}$"
 
 
 def _unwrap_embedded_math(match: re.Match[str]) -> str:
@@ -780,6 +1294,97 @@ def _replace_spaced_sub(match: re.Match[str]) -> str:
     return f"${match.group(1)}_{match.group(2)}$"
 
 
+_LEAKED_SET_MEMBER = re.compile(
+    r"(?<![$\\])"
+    r"([A-Za-z]{1,8}(?:_\{[^{}]+\})?(?:\^\{[^{}]+\})?)\s*"
+    r"(\\in|∈)\s*"
+    r"(\\mathbb\{[^}]+\})"
+    r"((?:\s*[\^_](?:\{[^{}]*\}|[A-Za-z0-9]+)){0,4})"
+)
+_LEAKED_LEQ_GROUP = re.compile(
+    r"(?<![$])(\((?:[^$()\n]{0,16})(?:\\leq|\\geq|\\le|\\ge|≤|≥)(?:[^$()\n]{0,32})\))"
+)
+
+
+def _in_math_span(text: str, index: int) -> bool:
+    before = text[:index]
+    if before.count("$$") % 2 == 1:
+        return True
+    return before.replace("$$", "").count("$") % 2 == 1
+
+
+def _wrap_set_member(match: re.Match[str]) -> str:
+    if _in_math_span(match.string, match.start()):
+        return match.group(0)
+    ident, inn, bb, scripts = match.group(1), match.group(2), match.group(3), match.group(4)
+    if re.fullmatch(r"[A-Z]{2}", ident):
+        ident = f"{ident[0]}_{{{ident[1]}}}"
+    elif re.fullmatch(r"[A-Z]{3}", ident) and _should_unglue_tensor(ident):
+        ident = f"{ident[0]}_{{{ident[2]}}}^{{{ident[1]}}}"
+    inn = r"\in" if inn == "∈" else inn
+    return f"${ident} {inn} {bb}{scripts}$"
+
+
+def _wrap_leq_group(match: re.Match[str]) -> str:
+    if _in_math_span(match.string, match.start()):
+        return match.group(0)
+    return f"${match.group(1)}$"
+
+
+def _wrap_tex_cmd(match: re.Match[str]) -> str:
+    if _in_math_span(match.string, match.start()):
+        return match.group(0)
+    return f"${_sanitize_math_body(match.group(1))}$"
+
+
+def _wrap_tex_symbol(match: re.Match[str]) -> str:
+    if _in_math_span(match.string, match.start()):
+        return match.group(0)
+    return f"${match.group(1)}$"
+
+
+def _wrap_prose_real_dim(match: re.Match[str]) -> str:
+    if _in_math_span(match.string, match.start()):
+        return match.group(0)
+    ident, inn, dim, rest = match.group(1), match.group(2), match.group(3), match.group(4)
+    inn = r"\in" if inn == "∈" else inn
+    body = rf"{inn} \mathbb{{R}}^{{{dim} \times {rest}}}"
+    if ident:
+        body = f"{ident} {body}"
+    return f"${body}$"
+
+
+def _wrap_delta_log(match: re.Match[str]) -> str:
+    if _in_math_span(match.string, match.start()):
+        return match.group(0)
+    ident = match.group(1)
+    letter = match.group(2)
+    body = rf"\log(\frac{{{letter}_1}}{{{letter}_0}})"
+    if ident:
+        ident = r"\Delta" if ident in {"Δ", "δ"} else ident
+        body = f"{ident} = {body}"
+    return f"${body}$"
+
+
+def _wrap_bare_assign(match: re.Match[str]) -> str:
+    if _in_math_span(match.string, match.start()):
+        return match.group(0)
+    from dl_agent.knowledge.formula_latex import looks_like_latex
+
+    blob = match.group(1).rstrip()
+    split = re.search(
+        r"(?i)\s+(where|and|is|are|the|with|for|denotes?|represents?)\b",
+        blob,
+    )
+    rest = ""
+    if split and split.start() > 8:
+        rest = blob[split.start() :]
+        blob = blob[: split.start()].rstrip()
+    if not looks_like_latex(blob) or "=" not in blob:
+        return match.group(0)
+    return f"\n$$\n{_sanitize_math_body(blob)}\n$$\n{rest}"
+
+
 def _wrap_prose_math(text: str) -> str:
     """把正文里的 x_m^i、|a-b|、\\mu、⌊$n\\times r$⌋ 收成行内公式。"""
     text = _FLOOR_DOLLARS.sub(lambda m: r"$\lfloor " + m.group(1).strip() + r" \rfloor$", text)
@@ -792,8 +1397,15 @@ def _wrap_prose_math(text: str) -> str:
         elif kind == "inline":
             rebuilt.append(_emit_inline(body))
         else:
-            part = _BARE_TEX_CMD.sub(lambda m: f"${_sanitize_math_body(m.group(1))}$", body)
-            part = _BARE_TEX_SYMBOL.sub(r"$\1$", part)
+            part = _repair_tensor_shapes(body)
+            part = _BARE_ASSIGN.sub(_wrap_bare_assign, part)
+            part = _DELTA_LOG_FRAC.sub(_wrap_delta_log, part)
+            part = _PROSE_REAL_DIM.sub(_wrap_prose_real_dim, part)
+            part = _LEAKED_SET_MEMBER.sub(_wrap_set_member, part)
+            part = _LEAKED_LEQ_GROUP.sub(_wrap_leq_group, part)
+            part = _LOSS_CAL.sub(_replace_loss_cal, part)
+            part = _BARE_TEX_CMD.sub(_wrap_tex_cmd, part)
+            part = _BARE_TEX_SYMBOL.sub(_wrap_tex_symbol, part)
             part = _SPACED_SUB.sub(_replace_spaced_sub, part)
             part = _BARE_INLINE_MATH.sub(_replace_bare_inline, part)
             rebuilt.append(part)
@@ -903,6 +1515,10 @@ def _tidy_math_paragraph(text: str) -> str:
         return f"{base}_{sub}^{mid}"
 
     cleaned = _TEX_JUNK.sub("", text)
+    cleaned = _repair_tensor_shapes(cleaned)
+    cleaned = _PROSE_REAL_DIM.sub(_wrap_prose_real_dim, cleaned)
+    cleaned = _DELTA_LOG_FRAC.sub(_wrap_delta_log, cleaned)
+    cleaned = _LEAKED_SET_MEMBER.sub(_wrap_set_member, cleaned)
     cleaned = _HAT.sub(replace_hat, cleaned)
     cleaned = _SPACED_ACCENT.sub(_replace_spaced_accent, cleaned)
     cleaned = _fold_spaced_math(cleaned)
@@ -945,6 +1561,18 @@ _OP_TO_LATEX = {
 
 def _fold_spaced_math(text: str) -> str:
     """把 L p × D、α ∈ [0,1] 这类「单字母+运算符」收成一段 $LaTeX$，不逐条写正则。"""
+    rebuilt: list[str] = []
+    for kind, body in _split_math_segments(text):
+        if kind == "display":
+            rebuilt.append(f"$$\n{body}\n$$" if body.strip() else "")
+        elif kind == "inline":
+            rebuilt.append(f"${body}$" if body.strip() else "")
+        else:
+            rebuilt.append(_fold_spaced_math_run(body))
+    return "".join(rebuilt)
+
+
+def _fold_spaced_math_run(text: str) -> str:
     pieces: list[str] = []
     run: list[tuple[str, str]] = []
 
@@ -1036,6 +1664,193 @@ def _better_figure(new: Figure, old: Figure) -> bool:
     if new.storage_key and not old.storage_key:
         return True
     return False
+
+
+_ABSTRACT_RUNIN = re.compile(
+    r"(?:^|\n\n)\s*(abstract|摘要)\s*[-—–:.\u2013\u2014]*\s*",
+    re.I,
+)
+_INDEX_TERMS_RUNIN = re.compile(
+    r"(?:^|\n\n)\s*(index\s+terms|keywords?|关键[词字])\s*[-—–:.\u2013\u2014]*\s*",
+    re.I,
+)
+_AFFILIATION_PARA = re.compile(
+    r"(?ix)"
+    r"\b(?:are|is|was)\s+with\b|"
+    r"e-?mail\s*:|"
+    r"corresponding author|"
+    r"senior member,\s*ieee|fellow,\s*ieee"
+)
+_DROP_CAP = re.compile(r"^([A-Z])\s+([A-Z][a-z]{2,})\b")
+_DROP_CAP_STOP = frozenset(
+    {
+        "the",
+        "this",
+        "that",
+        "these",
+        "those",
+        "there",
+        "novel",
+        "new",
+        "recent",
+        "traditional",
+        "however",
+        "although",
+        "existing",
+        "current",
+        "many",
+        "most",
+        "several",
+        "deep",
+        "multi",
+    }
+)
+_BODY_SECTION_KINDS = frozenset({"abstract", "intro", "related", "conclusion", "references"})
+
+
+def repair_front_matter(sections: list[Section]) -> list[Section]:
+    """拆出 Abstract— 跑题摘要，并把 IEEE 单位脚注从引言挪回作者区。GET 旧数据也能修好。"""
+    if not sections:
+        return sections
+    repaired = [section.model_copy(deep=True) for section in sections]
+    has_abstract = any(section.kind == "abstract" for section in repaired)
+    if not has_abstract:
+        repaired = _split_run_in_abstract(repaired)
+
+    affiliations: list[str] = []
+    for section in repaired:
+        if section.kind in {"abstract", "references"}:
+            continue
+        if _is_title_or_front(section):
+            continue
+        kept, peeled = _peel_affiliation_paragraphs(section.text)
+        if peeled:
+            section.text = kept
+            affiliations.extend(peeled)
+        section.text = _fix_drop_caps(section.text)
+
+    if affiliations:
+        target = _title_or_front_section(repaired)
+        extra = "\n\n".join(affiliations)
+        if extra and extra not in (target.text or ""):
+            target.text = f"{target.text}\n\n{extra}".strip() if target.text else extra
+    return repaired
+
+
+def _is_title_or_front(section: Section) -> bool:
+    title = section.title.strip()
+    if title.lower() == "front matter":
+        return True
+    if section.level != 1 or section.page_start > 1:
+        return False
+    if section.kind in _BODY_SECTION_KINDS:
+        return False
+    return looks_like_paper_title_heading(title)
+
+
+def _title_or_front_section(sections: list[Section]) -> Section:
+    for section in sections:
+        if _is_title_or_front(section):
+            return section
+    return sections[0]
+
+
+def _split_run_in_abstract(sections: list[Section]) -> list[Section]:
+    for index, section in enumerate(sections):
+        if section.kind == "abstract":
+            return sections
+        authors, abstract, index_terms = _split_title_blob(section.text)
+        if not abstract and not index_terms:
+            continue
+        if _is_title_or_front(section) or index == 0:
+            section.text = authors
+            if looks_like_paper_title_heading(section.title) and section.kind not in _BODY_SECTION_KINDS:
+                section.kind = "other"
+            abstract_text = abstract
+            if index_terms:
+                abstract_text = f"{abstract}\n\n{index_terms}" if abstract else index_terms
+            inserted = Section(
+                section_id=_next_section_id(sections),
+                paper_id=section.paper_id,
+                title="Abstract",
+                kind="abstract",
+                level=1,
+                page_start=section.page_start,
+                page_end=section.page_end,
+                text=abstract_text,
+                parent_id=None,
+                figure_ids=[],
+            )
+            return sections[: index + 1] + [inserted] + sections[index + 1 :]
+    return sections
+
+
+def _split_title_blob(text: str) -> tuple[str, str, str]:
+    blob = text or ""
+    match = _ABSTRACT_RUNIN.search(blob)
+    if not match:
+        return blob.strip(), "", ""
+    authors = blob[: match.start()].strip()
+    rest = blob[match.end() :].strip()
+    index_match = _INDEX_TERMS_RUNIN.search(rest)
+    if not index_match:
+        return authors, rest, ""
+    abstract = rest[: index_match.start()].strip()
+    terms = rest[index_match.start() :].strip()
+    return authors, abstract, terms
+
+
+def _peel_affiliation_paragraphs(text: str) -> tuple[str, list[str]]:
+    if not text.strip():
+        return text, []
+    kept: list[str] = []
+    peeled: list[str] = []
+    for part in re.split(r"\n\s*\n", text):
+        paragraph = part.strip()
+        if not paragraph:
+            continue
+        if _is_affiliation_paragraph(paragraph):
+            peeled.append(paragraph)
+        else:
+            kept.append(paragraph)
+    return "\n\n".join(kept).strip(), peeled
+
+
+def _is_affiliation_paragraph(text: str) -> bool:
+    blob = re.sub(r"\s+", " ", text).strip()
+    if len(blob) > 700:
+        return False
+    return bool(_AFFILIATION_PARA.search(blob))
+
+
+def _fix_drop_caps(text: str) -> str:
+    if not text:
+        return text
+    parts: list[str] = []
+    for part in re.split(r"(\n\s*\n)", text):
+        if not part.strip() or part.startswith("\n"):
+            parts.append(part)
+            continue
+        match = _DROP_CAP.match(part)
+        if match and match.group(2).lower() not in _DROP_CAP_STOP:
+            letter, rest = match.group(1), match.group(2)
+            parts.append(letter + rest[0].lower() + rest[1:] + part[match.end() :])
+        else:
+            parts.append(part)
+    return "".join(parts)
+
+
+def _next_section_id(sections: list[Section]) -> str:
+    used = {section.section_id for section in sections}
+    max_n = 0
+    for section_id in used:
+        match = re.match(r"sec-(\d+)$", section_id)
+        if match:
+            max_n = max(max_n, int(match.group(1)))
+    n = max_n + 1
+    while f"sec-{n:03d}" in used:
+        n += 1
+    return f"sec-{n:03d}"
 
 
 def collapse_false_headings(sections: list[Section]) -> list[Section]:

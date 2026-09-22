@@ -10,12 +10,12 @@ from dl_agent.knowledge.store import FilePaperStore
 from tests.helpers import make_png
 
 
-def _minimal_text_pdf() -> bytes:
+def _minimal_text_pdf(label: str = "Placeholder page for API ingest tests.") -> bytes:
     import pymupdf
 
     doc = pymupdf.open()
     page = doc.new_page()
-    page.insert_text((72, 72), "Placeholder page for API ingest tests.")
+    page.insert_text((72, 72), label)
     data = doc.tobytes()
     doc.close()
     return data
@@ -47,7 +47,11 @@ def test_upload_and_fetch_sections_figures(tmp_path) -> None:
             ],
         )
 
-    svc = KnowledgeService(FilePaperStore(tmp_path), Settings(data_dir=tmp_path), parse_fn=parse)
+    svc = KnowledgeService(
+        FilePaperStore(tmp_path),
+        Settings(data_dir=tmp_path, formula_vision_enabled=False),
+        parse_fn=parse,
+    )
     app.dependency_overrides[get_knowledge] = lambda: svc
     client = TestClient(app)
     try:
@@ -65,6 +69,7 @@ def test_upload_and_fetch_sections_figures(tmp_path) -> None:
             svc.finish_ingest(paper_id)
             body_json = client.get(f"/papers/{paper_id}").json()
         assert body_json["status"] == "ready"
+        assert body_json["index_status"] == "ready"
         assert body_json["figure_count"] == 1
         assert body_json["parser"] == "pymupdf"
 
@@ -100,5 +105,67 @@ def test_upload_and_fetch_sections_figures(tmp_path) -> None:
         if payload["status"] in {"queued", "parsing"}:
             svc.finish_ingest(paper_id)
         assert client.get(f"/papers/{paper_id}").json()["status"] == "ready"
+
+        search = client.get(f"/papers/{paper_id}/search", params={"q": "pipeline"})
+        assert search.status_code == 200
+        evidence = search.json()
+        assert isinstance(evidence, list)
+        rebuild = client.post(f"/papers/{paper_id}/index")
+        assert rebuild.status_code == 200
+        assert rebuild.json()["index_status"] in {"pending", "ready"}
+        indexed = client.get(f"/papers/{paper_id}").json()
+        assert indexed["index_status"] == "ready"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_list_papers_newest_first(tmp_path) -> None:
+    body = "Readable paper text for the parser gate. " * 30
+
+    def parse(_path: str) -> ParseResult:
+        return ParseResult(
+            parser="pymupdf",
+            page_count=1,
+            items=[
+                LayoutItem(kind="heading", page=1, text="Abstract", level=1),
+                LayoutItem(kind="text", page=1, text=body),
+            ],
+        )
+
+    svc = KnowledgeService(
+        FilePaperStore(tmp_path),
+        Settings(data_dir=tmp_path, formula_vision_enabled=False),
+        parse_fn=parse,
+    )
+    app.dependency_overrides[get_knowledge] = lambda: svc
+    client = TestClient(app)
+    try:
+        empty = client.get("/papers")
+        assert empty.status_code == 200
+        assert empty.json() == []
+
+        first = client.post(
+            "/papers",
+            files={"file": ("alpha.pdf", _minimal_text_pdf("alpha paper"), "application/pdf")},
+        )
+        second = client.post(
+            "/papers",
+            files={"file": ("beta.pdf", _minimal_text_pdf("beta paper"), "application/pdf")},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_id = first.json()["paper_id"]
+        second_id = second.json()["paper_id"]
+        for paper_id in (first_id, second_id):
+            status = client.get(f"/papers/{paper_id}").json()["status"]
+            if status in {"queued", "parsing"}:
+                svc.finish_ingest(paper_id)
+
+        (tmp_path / "papers" / first_id / "paper.json").touch()
+        listed = client.get("/papers").json()
+        ids = [item["paper_id"] for item in listed]
+        assert ids == [first_id, second_id]
+        assert listed[0]["filename"] == "alpha.pdf"
+        assert listed[1]["filename"] == "beta.pdf"
     finally:
         app.dependency_overrides.clear()

@@ -1,7 +1,9 @@
 import type {
   Figure,
+  FigureTranslation,
   MethodExplain,
   Paper,
+  PaperAnswer,
   PaperIntro,
   Section,
   SectionTranslation,
@@ -25,6 +27,7 @@ export const demoPaper: Paper = {
   intro_status: "ready",
   method_status: "ready",
   translate_status: "ready",
+  index_status: "ready",
 };
 
 export const demoSections: Section[] = [
@@ -215,6 +218,173 @@ export const demoMethod: MethodExplain = {
 };
 
 export const demoTitleZh = "HieraAlign：面向视觉语言模型的层次化跨模态对齐";
+
+export const demoAskSuggestions = [
+  "这篇论文主要解决什么问题？",
+  "方法流水线分哪几步？",
+  "我之前研读过类似方向的论文吗？",
+  "在 arXiv 上检索相关论文",
+];
+
+export const demoAskAnswers: Record<string, PaperAnswer> = {
+  "这篇论文主要解决什么问题？": {
+    paper_id: PAPER_ID,
+    question: "这篇论文主要解决什么问题？",
+    answer_zh:
+      "主流双塔视觉语言模型往往只对齐全局图像与文本向量，丢掉了区域与短语级对应。HieraAlign 用补丁 / 区域 / 整图与短语 / 句子 / 标题三层对齐，以提升检索与定位。",
+    citations: [
+      {
+        page: 1,
+        section_title: "1 Introduction",
+        section_id: "sec-intro",
+        quote:
+          "Existing dual-encoder models typically project a single image CLS and a caption embedding into a shared space, discarding region and phrase structure.",
+        sourced: true,
+      },
+    ],
+    figure_ids: ["fig-overview"],
+    no_evidence: false,
+    partial: false,
+    model: "demo",
+    prompt_version: "ask-demo",
+    embedding_version: "demo",
+  },
+  "方法流水线分哪几步？": {
+    paper_id: PAPER_ID,
+    question: "方法流水线分哪几步？",
+    answer_zh:
+      "大致三步：先从层次视觉骨干得到 Patch / Region / CLS；再从文本侧编码短语、句子与标题；最后经共享投影做层级对比学习，损失为 $$\\mathcal{L} = \\lambda \\mathcal{L}_{\\mathrm{con}} + \\mathcal{L}_{\\mathrm{ce}}$$。",
+    citations: [
+      {
+        page: 3,
+        section_title: "3 Method",
+        section_id: "sec-method",
+        quote: "We construct patch, region, and image tokens from a hierarchical vision backbone",
+        sourced: true,
+      },
+      {
+        page: 4,
+        section_title: "3 Method",
+        section_id: "sec-method",
+        quote: "A shared projection maps all levels into one embedding space",
+        sourced: true,
+      },
+    ],
+    figure_ids: ["fig-pipeline"],
+    no_evidence: false,
+    partial: false,
+    model: "demo",
+    prompt_version: "ask-demo",
+    embedding_version: "demo",
+  },
+  "实验在哪些数据集上评估？": {
+    paper_id: PAPER_ID,
+    question: "实验在哪些数据集上评估？",
+    answer_zh: "论文在 Flickr30K、COCO 与 RefCOCO 上评估，相对双塔基线提升了 Recall@1 与定位 IoU。",
+    citations: [
+      {
+        page: 5,
+        section_title: "4 Experiments",
+        section_id: "sec-experiment",
+        quote: "We evaluate on Flickr30K, COCO, and RefCOCO.",
+        sourced: true,
+      },
+    ],
+    figure_ids: [],
+    no_evidence: false,
+    partial: false,
+    model: "demo",
+    prompt_version: "ask-demo",
+    embedding_version: "demo",
+  },
+  "我之前研读过类似方向的论文吗？": {
+    paper_id: PAPER_ID,
+    question: "我之前研读过类似方向的论文吗？",
+    answer_zh: "本地库里有一篇层次视觉 Transformer 工作，和当前这篇的跨模态对齐相关。细节需打开该篇精读。",
+    citations: [],
+    figure_ids: [],
+    library_hits: [
+      {
+        paper_id: "demo-hiera",
+        title: "Hiera: A Hierarchical Vision Transformer without the Bells-and-Whistles",
+        filename: "hiera.pdf",
+        authors: ["Chaitanya Ryali", "Yuan-Ting Hu", "Daniel Bolya"],
+        abstract: "We introduce Hiera, a hierarchical vision transformer that is fast, powerful, and simple.",
+        why: "摘要命中 hierarchical alignment",
+        openable: true,
+        index_status: "ready",
+      },
+    ],
+    mode: "library",
+    no_evidence: false,
+    partial: false,
+    model: "demo",
+    prompt_version: "ask-demo",
+    embedding_version: "demo",
+  },
+  "在 arXiv 上检索相关论文": {
+    paper_id: PAPER_ID,
+    question: "在 arXiv 上检索相关论文",
+    answer_zh:
+      "arXiv 上能检索到标题相近的层次视觉 Transformer 工作。这些是外部文献元数据，不是当前这篇 PDF 的原文证据。",
+    citations: [],
+    figure_ids: [],
+    external_refs: [
+      {
+        source: "arxiv",
+        title: "Hiera: A Hierarchical Vision Transformer without the Bells-and-Whistles",
+        url: "https://arxiv.org/abs/2306.00989",
+        identifier: "arxiv:2306.00989",
+        snippet: "We introduce Hiera, a hierarchical vision transformer that is fast, powerful, and simple.",
+        year: 2023,
+        authors: ["Chaitanya Ryali", "Yuan-Ting Hu", "Daniel Bolya"],
+      },
+    ],
+    mode: "arxiv",
+    no_evidence: false,
+    partial: false,
+    model: "demo",
+    prompt_version: "ask-demo",
+    embedding_version: "demo",
+  },
+};
+
+export function demoAnswerFor(question: string): PaperAnswer {
+  const hit = demoAskAnswers[question.trim()];
+  if (hit) return hit;
+  return {
+    paper_id: PAPER_ID,
+    question,
+    answer_zh:
+      "这是界面预览里的示意回答。正式接入检索问答后，会按当前论文证据作答，并附可跳页的引用。",
+    citations: [
+      {
+        page: 3,
+        section_title: "3 Method",
+        section_id: "sec-method",
+        quote: "A shared projection maps all levels into one embedding space",
+        sourced: true,
+      },
+    ],
+    figure_ids: [],
+    no_evidence: false,
+    partial: true,
+    model: "demo",
+    prompt_version: "ask-demo",
+    embedding_version: "demo",
+  };
+}
+
+export const demoFigureTranslations: FigureTranslation[] = [
+  {
+    figure_id: "fig-overview",
+    caption_zh: "图 1. HieraAlign 总览：三个视觉层级与三个文本层级对齐。",
+  },
+  {
+    figure_id: "fig-pipeline",
+    caption_zh: "图 2. Token 构造与共享投影。",
+  },
+];
 
 export const demoTranslations: SectionTranslation[] = [
   {

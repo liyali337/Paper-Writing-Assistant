@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PDFWorker, getDocument, type PDFDocumentProxy, type RenderTask } from "pdfjs-dist";
 import PdfJsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
 
-import { formatApiError, getTranslations, startTranslations } from "../api/client";
+import { formatApiError, cancelTranslations, getTranslations, startTranslations } from "../api/client";
 import type { Figure, PaperTranslation, Section, SectionTranslation } from "../api/types";
 import { HttpError } from "../api/types";
-import { demoTitleZh, demoTranslations } from "../data/demo";
+import { demoFigureTranslations, demoTitleZh, demoTranslations } from "../data/demo";
 import { DemoDiagram } from "./DemoDiagram";
 import { Chevron } from "./icons";
-import { SectionReader, type LangMode } from "./SectionReader";
+import { isMetaSection, SectionReader, type LangMode } from "./SectionReader";
 
 export type SourceView = "pdf" | "sections";
 
@@ -56,61 +56,107 @@ export function PdfPane({
   const [showEn, setShowEn] = useState(true);
   const [showZh, setShowZh] = useState(true);
   const [translations, setTranslations] = useState<Map<string, SectionTranslation>>(new Map());
+  const [figureCaptions, setFigureCaptions] = useState<Map<string, string>>(new Map());
   const [titleZh, setTitleZh] = useState<string | null>(null);
   const [translating, setTranslating] = useState(false);
   const [translateHint, setTranslateHint] = useState<string | null>(null);
   const [translateError, setTranslateError] = useState<string | null>(null);
+  const [translateStopped, setTranslateStopped] = useState(false);
+  const pollGeneration = useRef(0);
+  const showZhRef = useRef(showZh);
+  const figuresRef = useRef(figures);
+  const sectionsRef = useRef(sections);
+  showZhRef.current = showZh;
+  figuresRef.current = figures;
+  sectionsRef.current = sections;
 
   const lang = useMemo<LangMode>(() => ({ showEn, showZh }), [showEn, showZh]);
+  const figuresWithCaptions = useMemo(
+    () =>
+      figures.map((figure) => ({
+        ...figure,
+        caption_zh: figureCaptions.get(figure.figure_id) ?? figure.caption_zh ?? null,
+      })),
+    [figures, figureCaptions],
+  );
 
   const translateProgress = useMemo(() => {
     if (preview || sections.length === 0) return null;
-    const total = sections.filter(
+    const translatable = sections.filter(
       (section) =>
         section.text.trim() &&
         section.kind !== "references" &&
+        !isMetaSection(section, paperTitle) &&
         !/^(references|bibliography|参考文献)$/i.test(section.title.trim()),
-    ).length;
-    const done = sections.filter((section) => {
+    );
+    const total = translatable.length;
+    const done = translatable.filter((section) => {
       const zh = translations.get(section.section_id);
       return zh && !zh.partial && usableTranslation(zh);
     }).length;
     return { done, total };
-  }, [preview, sections, translations]);
+  }, [preview, paperTitle, sections, translations]);
 
   const applyPayload = useCallback((payload: PaperTranslation) => {
     setTranslations(new Map(payload.sections.map((item) => [item.section_id, item])));
+    setFigureCaptions(
+      new Map((payload.figures ?? []).map((item) => [item.figure_id, item.caption_zh])),
+    );
     setTitleZh(payload.title_zh?.trim() || null);
   }, []);
 
   const loadTranslations = useCallback(
-    async (refresh = false) => {
+    async (mode: "auto" | "resume" | "refresh" = "auto") => {
       if (!paperId || preview || sections.length === 0) return;
-      setTranslating(true);
+      const gen = ++pollGeneration.current;
+      const markWorking = (hint: string | null = null) => {
+        setTranslating(true);
+        setTranslateError(null);
+        setTranslateStopped(false);
+        setTranslateHint(hint);
+      };
       setTranslateError(null);
-      setTranslateHint(null);
+      // 进入论文时先静默拉取已有译文，确认仍在进行中再显示「停止翻译」
+      if (mode === "refresh") {
+        markWorking("正在重新翻译，请稍候…");
+      } else if (mode === "resume") {
+        markWorking("继续翻译未完成的章节…");
+      } else {
+        setTranslating(false);
+      }
       try {
         let payload: PaperTranslation;
-        if (refresh) {
+        if (mode === "refresh") {
           setTranslations(new Map());
+          setFigureCaptions(new Map());
           setTitleZh(null);
-          setTranslateHint("正在重新翻译，请稍候…");
           payload = await startTranslations(paperId, true);
+        } else if (mode === "resume") {
+          payload = await startTranslations(paperId, false);
         } else {
           try {
             payload = await getTranslations(paperId);
           } catch (error) {
             if (error instanceof HttpError && error.status === 404) {
+              markWorking(null);
               payload = await startTranslations(paperId, false);
             } else {
               throw error;
             }
           }
+          if (payload.status === "cancelled") {
+            applyPayload(payload);
+            setTranslateStopped(true);
+            setTranslateHint("翻译已终止，已完成的章节仍会保留。");
+            return;
+          }
           // pending 可能是服务重启后的僵尸任务：POST 触发后台续跑
           if (payload.status === "pending") {
+            markWorking(null);
             payload = await startTranslations(paperId, false);
           }
         }
+        if (gen !== pollGeneration.current) return;
         applyPayload(payload);
         if (payload.status === "failed") {
           setTranslateError(
@@ -120,12 +166,44 @@ export function PdfPane({
           );
           return;
         }
+        if (payload.status === "cancelled") {
+          setTranslateStopped(true);
+          setTranslateHint("翻译已终止，已完成的章节仍会保留。");
+          return;
+        }
+        const captionedFigures = figuresRef.current.filter(
+          (figure) => figure.kind !== "formula" && Boolean(figure.caption?.trim()),
+        );
+        const translatedCaptionIds = new Set(
+          (payload.figures ?? [])
+            .filter((item) => /[\u4e00-\u9fff]/.test(item.caption_zh || ""))
+            .map((item) => item.figure_id),
+        );
+        if (
+          showZhRef.current &&
+          (payload.status === "ready" || payload.status === "partial") &&
+          captionedFigures.some((figure) => !translatedCaptionIds.has(figure.figure_id))
+        ) {
+          payload = await startTranslations(paperId, false);
+          if (gen !== pollGeneration.current) return;
+          applyPayload(payload);
+          if (payload.status === "pending") {
+            markWorking("正在翻译图注…");
+          }
+        }
         let stagnantPolls = 0;
         let lastSectionCount = payload.sections.length;
         while (payload.status === "pending") {
           await new Promise((resolve) => window.setTimeout(resolve, 2500));
+          if (gen !== pollGeneration.current) return;
           payload = await getTranslations(paperId);
+          if (gen !== pollGeneration.current) return;
           applyPayload(payload);
+          if (payload.status === "cancelled") {
+            setTranslateStopped(true);
+            setTranslateHint("翻译已终止，已完成的章节仍会保留。");
+            return;
+          }
           if (payload.sections.length > lastSectionCount) {
             lastSectionCount = payload.sections.length;
             stagnantPolls = 0;
@@ -156,15 +234,70 @@ export function PdfPane({
           );
           return;
         }
+        if (payload.status === "cancelled") {
+          setTranslateStopped(true);
+          setTranslateHint("翻译已终止，已完成的章节仍会保留。");
+          return;
+        }
         applyPayload(payload);
+        if (payload.status === "ready" || payload.status === "partial") {
+          const missing = sectionsRef.current.some((section) => {
+            if (!section.text.trim() || section.kind === "references") return false;
+            if (isMetaSection(section, paperTitle)) return false;
+            if (/^(references|bibliography|参考文献)$/i.test(section.title.trim())) return false;
+            const zh = payload.sections.find((item) => item.section_id === section.section_id);
+            return !zh || zh.partial || !usableTranslation(zh);
+          });
+          if (missing && mode !== "refresh") {
+            payload = await startTranslations(paperId, false);
+            if (gen !== pollGeneration.current) return;
+            applyPayload(payload);
+            if (payload.status === "pending") {
+              markWorking("还有未完成的章节，正在继续翻译…");
+            }
+            while (payload.status === "pending") {
+              await new Promise((resolve) => window.setTimeout(resolve, 2500));
+              if (gen !== pollGeneration.current) return;
+              payload = await getTranslations(paperId);
+              if (gen !== pollGeneration.current) return;
+              applyPayload(payload);
+              if (payload.status === "cancelled") {
+                setTranslateStopped(true);
+                setTranslateHint("翻译已终止，已完成的章节仍会保留。");
+                return;
+              }
+            }
+          }
+          if (payload.status === "ready" || payload.status === "partial") {
+            setTranslateHint(null);
+          }
+        }
       } catch (error) {
+        if (gen !== pollGeneration.current) return;
         setTranslateError(formatApiError(error));
       } finally {
-        setTranslating(false);
+        if (gen === pollGeneration.current) setTranslating(false);
       }
     },
-    [applyPayload, paperId, preview, sections.length],
+    [applyPayload, paperId, paperTitle, preview, sections.length],
   );
+
+  const stopTranslations = useCallback(async () => {
+    if (!paperId || preview) return;
+    pollGeneration.current += 1;
+    setTranslateHint("正在终止翻译…");
+    try {
+      const payload = await cancelTranslations(paperId);
+      applyPayload(payload);
+      setTranslateError(null);
+      setTranslateStopped(true);
+      setTranslateHint("翻译已终止，已完成的章节仍会保留。");
+    } catch (error) {
+      setTranslateError(formatApiError(error));
+    } finally {
+      setTranslating(false);
+    }
+  }, [applyPayload, paperId, preview]);
 
   const toggleEn = useCallback(() => {
     setShowEn((current) => {
@@ -182,26 +315,26 @@ export function PdfPane({
 
   useEffect(() => {
     if (!showZh) {
-      setTranslating(false);
       return;
     }
     if (preview) {
       setTranslations(new Map(demoTranslations.map((item) => [item.section_id, item])));
+      setFigureCaptions(new Map(demoFigureTranslations.map((item) => [item.figure_id, item.caption_zh])));
       setTitleZh(demoTitleZh);
       setTranslateError(null);
       setTranslateHint(null);
+      setTranslateStopped(false);
       setTranslating(false);
       return;
     }
     if (!paperId || sections.length === 0) return;
 
-    let cancelled = false;
-    void loadTranslations(false).finally(() => {
-      if (cancelled) setTranslating(false);
-    });
+    void loadTranslations("auto");
 
     return () => {
-      cancelled = true;
+      if (showZhRef.current) {
+        pollGeneration.current += 1;
+      }
     };
   }, [loadTranslations, paperId, preview, sections.length, showZh]);
 
@@ -238,11 +371,39 @@ export function PdfPane({
             >
               中文
             </button>
+          </div>
+        ) : null}
+        {view === "sections" ? (
+          <div className="translate-actions">
+            {translating ? (
+              <button
+                className="ghost-btn is-stop"
+                type="button"
+                disabled={preview || !paperId}
+                onClick={() => void stopTranslations()}
+              >
+                停止翻译
+              </button>
+            ) : null}
+            {!translating &&
+            (translateStopped ||
+              (translateProgress != null &&
+                translateProgress.done < translateProgress.total &&
+                translations.size > 0)) ? (
+              <button
+                className="ghost-btn"
+                type="button"
+                disabled={preview || !paperId}
+                onClick={() => void loadTranslations("resume")}
+              >
+                继续翻译
+              </button>
+            ) : null}
             <button
               className="ghost-btn"
               type="button"
-              disabled={preview || !paperId}
-              onClick={() => void loadTranslations(true)}
+              disabled={preview || !paperId || translating}
+              onClick={() => void loadTranslations("refresh")}
             >
               重新翻译
             </button>
@@ -298,7 +459,7 @@ export function PdfPane({
         <div className="source-scroll">
           <SectionReader
             sections={sections}
-            figures={figures}
+            figures={figuresWithCaptions}
             paperId={paperId}
             preview={preview}
             paperTitle={paperTitle}
@@ -311,6 +472,7 @@ export function PdfPane({
             translateHint={translateHint}
             translateProgress={translateProgress}
             translateError={translateError}
+            onStopTranslate={() => void stopTranslations()}
             onJump={(nextPage) => {
               onPage(nextPage);
               onView("pdf");

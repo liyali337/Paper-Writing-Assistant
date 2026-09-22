@@ -3,57 +3,63 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Mous
 import {
   formatApiError,
   getFigures,
-  getIntro,
-  getMethod,
   getPaper,
   getSections,
-  refreshIntro,
-  refreshMethod,
+  rebuildPaperIndex,
   reparsePaper,
   sourcePdfUrl,
   uploadPaper,
 } from "../api/client";
 import { HttpError } from "../api/types";
-import type { Figure, MethodExplain, Paper, PaperIntro, Section } from "../api/types";
-import { demoFigures, demoIntro, demoMethod, demoPaper, demoSections } from "../data/demo";
+import type { Figure, Paper, Section } from "../api/types";
+import { demoFigures, demoPaper, demoSections } from "../data/demo";
+import { AskPanel, type AskMessage } from "./AskPanel";
 import { Lightbox } from "./FigureViews";
-import { IntroPanel } from "./IntroPanel";
 import { Outline } from "./Outline";
 import { PdfPane, type SourceView } from "./PdfPane";
-import { LogoMark, RefreshIcon, TreeIcon } from "./icons";
-import { MethodPanel } from "./MethodPanel";
+import { AppHeader } from "./AppHeader";
+import { RefreshIcon, TreeIcon } from "./icons";
 
 export type WorkspaceProps = {
   file: File | null;
   preview: boolean;
+  paperId?: string;
   onReset: () => void;
   onLoadPreview: () => void;
 };
 
-type Tab = "intro" | "method";
-
 type Chip = { label: string; tone: "ok" | "run" | "warn" | "bad" | "mute" };
 
-export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspaceProps) {
+type ReturnFrame = { paperId: string; messages: AskMessage[] };
+
+export function Workspace({
+  file,
+  preview,
+  paperId: initialPaperId,
+  onReset,
+  onLoadPreview,
+}: WorkspaceProps) {
   const objectUrl = useRef<string | null>(file ? URL.createObjectURL(file) : null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const [outlineOn, setOutlineOn] = useState(true);
   const [analysisW, setAnalysisW] = useState("42%");
   const [dragging, setDragging] = useState(false);
-  const [tab, setTab] = useState<Tab>("intro");
   const [sourceView, setSourceView] = useState<SourceView>("sections");
   const [page, setPage] = useState(1);
-  const [paperId, setPaperId] = useState<string | null>(preview ? "demo" : null);
+  const [paperId, setPaperId] = useState<string | null>(preview ? "demo" : initialPaperId ?? null);
   const [paper, setPaper] = useState<Paper | null>(preview ? demoPaper : null);
   const [sections, setSections] = useState<Section[]>(preview ? demoSections : []);
   const [figures, setFigures] = useState<Figure[]>(preview ? demoFigures : []);
-  const [intro, setIntro] = useState<PaperIntro | null>(preview ? demoIntro : null);
-  const [method, setMethod] = useState<MethodExplain | null>(preview ? demoMethod : null);
   const [notice, setNotice] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<Figure | undefined>();
   const [uploading, setUploading] = useState(false);
   const [docPages, setDocPages] = useState(0);
   const [focusSection, setFocusSection] = useState<string | null>(null);
   const [ingestGen, setIngestGen] = useState(0);
+  const indexKick = useRef(false);
+  const restoringRef = useRef(false);
+  const [askMessages, setAskMessages] = useState<AskMessage[]>([]);
+  const [returnStack, setReturnStack] = useState<ReturnFrame[]>([]);
 
   useEffect(() => {
     return () => {
@@ -81,9 +87,18 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
   }, [file, preview]);
 
   useEffect(() => {
+    if (restoringRef.current) {
+      restoringRef.current = false;
+      return;
+    }
+    setAskMessages([]);
+  }, [paperId, preview]);
+
+  useEffect(() => {
     if (preview || !paperId) return;
     let cancelled = false;
     let timer = 0;
+    indexKick.current = false;
 
     const tick = async () => {
       try {
@@ -96,26 +111,23 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
           setSections(Array.isArray(sec) ? sec : []);
           setFigures(Array.isArray(fig) ? fig : []);
         }
-        if (next.intro_status === "ready" || next.intro_status === "partial") {
-          try {
-            setIntro(await getIntro(paperId));
-          } catch (error) {
-            if (!(error instanceof HttpError && error.status === 202)) throw error;
-          }
-        }
-        if (next.method_status === "ready" || next.method_status === "partial") {
-          try {
-            setMethod(await getMethod(paperId));
-          } catch (error) {
-            if (!(error instanceof HttpError && error.status === 202)) throw error;
-          }
-        }
         const ingesting = next.status === "queued" || next.status === "parsing";
+        const indexing =
+          next.status === "ready" && (next.index_status === "pending" || !next.index_status);
+        if (indexing && !indexKick.current) {
+          indexKick.current = true;
+          try {
+            await rebuildPaperIndex(paperId);
+          } catch {
+            indexKick.current = false;
+          }
+          if (cancelled) return;
+        }
         const done =
-          ["ready", "needs_ocr", "ingest_failed"].includes(next.status) &&
-          next.intro_status !== "pending" &&
-          next.method_status !== "pending";
-        if (!done) timer = window.setTimeout(() => void tick(), ingesting ? 5000 : 1600);
+          next.status === "needs_ocr" ||
+          next.status === "ingest_failed" ||
+          (next.status === "ready" && next.index_status != null && next.index_status !== "pending");
+        if (!done) timer = window.setTimeout(() => void tick(), ingesting || indexing ? 4000 : 1600);
       } catch (error) {
         if (cancelled) return;
         if (error instanceof HttpError && error.status === 501) {
@@ -135,11 +147,21 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
 
   const onSplit = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
+    const root = workspaceRef.current;
+    if (!root) return;
     setDragging(true);
     const onMove = (move: MouseEvent) => {
-      const width = window.innerWidth - move.clientX;
-      const pct = Math.min(58, Math.max(32, (width / window.innerWidth) * 100));
-      setAnalysisW(`${pct}%`);
+      const rect = root.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const outline = outlineOn
+        ? root.querySelector(".outline")?.getBoundingClientRect().width ?? 248
+        : 0;
+      const minAnalysis = 280;
+      const minSource = 360;
+      const splitterW = 7;
+      const maxAnalysis = Math.max(minAnalysis, rect.width - outline - splitterW - minSource);
+      const next = Math.min(maxAnalysis, Math.max(minAnalysis, rect.right - move.clientX));
+      setAnalysisW(`${(next / rect.width) * 100}%`);
     };
     const onUp = () => {
       setDragging(false);
@@ -148,7 +170,7 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, []);
+  }, [outlineOn]);
 
   const pageCount = Math.max(
     paper?.page_count || 0,
@@ -181,6 +203,14 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
     [syncPage],
   );
 
+  const onAskJump = useCallback(
+    (next: number, sectionId?: string) => {
+      if (sectionId) jumpToSection(next, sectionId);
+      else jumpToPage(next);
+    },
+    [jumpToPage, jumpToSection],
+  );
+
   const onPageCount = useCallback((count: number) => {
     setDocPages(count);
   }, []);
@@ -208,14 +238,29 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
     }
   }
 
-  async function onRefresh() {
-    if (preview || !paperId) return;
-    try {
-      if (tab === "intro") setIntro(await refreshIntro(paperId));
-      else setMethod(await refreshMethod(paperId));
-    } catch (error) {
-      setNotice(formatApiError(error));
+  function openLibraryPaper(nextId: string) {
+    if (!nextId || nextId === paperId) return;
+    if (paperId) {
+      setReturnStack((current) => [...current, { paperId, messages: askMessages }]);
     }
+    setPage(1);
+    setFocusSection(null);
+    setAskMessages([]);
+    setPaperId(nextId);
+  }
+
+  function onLeavePaper() {
+    const prev = returnStack[returnStack.length - 1];
+    if (!prev) {
+      onReset();
+      return;
+    }
+    restoringRef.current = true;
+    setReturnStack((current) => current.slice(0, -1));
+    setPage(1);
+    setFocusSection(null);
+    setPaperId(prev.paperId);
+    setAskMessages(prev.messages);
   }
 
   const chips = statusChips(paper, uploading, preview, notice);
@@ -225,41 +270,57 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
     (uploading || !paper || paper.status === "queued" || paper.status === "parsing");
 
   const paperTitle = paper?.title || file?.name || paper?.filename || null;
+  const askReady = preview || (!waiting && paper?.status === "ready");
+  const askBlocked =
+    paper?.status === "needs_ocr"
+      ? "扫描件文本过少，请换可复制文本的 PDF 后再提问。"
+      : paper?.status === "ingest_failed"
+        ? "解析失败，无法开始问答。"
+        : waiting
+          ? "论文仍在解析，请稍候。"
+          : null;
+  const askHint =
+    paper?.status === "ready" && (paper.index_status === "pending" || !paper.index_status)
+      ? "本篇精读索引还在建。可以先问本地库或在 arXiv 上检索；问这篇原文请稍候。"
+      : paper?.status === "ready" && paper.index_status === "failed"
+        ? `本篇精读索引失败${paper.index_error ? `：${paper.index_error}` : ""}。仍可问本地库或 arXiv，或点重建索引。`
+        : paper?.status === "ready" && paper.index_status === "skipped"
+          ? "这篇没有可检索的正文，无法精读提问；仍可问本地库或在 arXiv 上检索。"
+          : null;
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <button className="brand" type="button" onClick={onReset}>
-          <span className="brand-mark">
-            <LogoMark />
-          </span>
-          <span className="brand-name">论文理解</span>
-        </button>
-        <div className="topbar-file">
-          <span>{paper?.title || file?.name || paper?.filename || "未命名论文"}</span>
-        </div>
-        <div className="topbar-actions">
-          {chips.map((chip) => (
-            <span key={chip.label} className={`chip is-${chip.tone}`}>
-              <i />
-              {chip.label}
-            </span>
-          ))}
-          <button
-            className="ghost-btn"
-            type="button"
-            disabled={preview || !paperId || uploading || waiting}
-            onClick={() => void onReparse()}
-          >
-            <RefreshIcon />
-            重跑解析
-          </button>
-          <button className="ghost-btn" type="button" onClick={onReset}>
-            换一篇
-          </button>
-        </div>
-      </header>
-      <div className={`workspace${outlineOn ? "" : " is-outline-off"}`} style={{ "--analysis": analysisW } as CSSProperties}>
+      <AppHeader
+        onBrand={onReset}
+        center={<span>{paper?.title || file?.name || paper?.filename || "未命名论文"}</span>}
+        actions={
+          <>
+            {chips.map((chip) => (
+              <span key={chip.label} className={`chip is-${chip.tone}`}>
+                <i />
+                {chip.label}
+              </span>
+            ))}
+            <button
+              className="ghost-btn"
+              type="button"
+              disabled={preview || !paperId || uploading || waiting}
+              onClick={() => void onReparse()}
+            >
+              <RefreshIcon />
+              重跑解析
+            </button>
+            <button className="ghost-btn" type="button" onClick={onLeavePaper}>
+              {returnStack.length ? "返回上一篇" : "换一篇"}
+            </button>
+          </>
+        }
+      />
+      <div
+        ref={workspaceRef}
+        className={`workspace${outlineOn ? "" : " is-outline-off"}`}
+        style={{ "--analysis": analysisW } as CSSProperties}
+      >
         <aside className="pane outline">
           <div className="outline-head">目录</div>
           <Outline
@@ -296,11 +357,8 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
         <section className="pane analysis">
           <div className="analysis-head">
             <div className="tabs">
-              <button className={tab === "intro" ? "is-on" : ""} type="button" onClick={() => setTab("intro")}>
-                总体介绍
-              </button>
-              <button className={tab === "method" ? "is-on" : ""} type="button" onClick={() => setTab("method")}>
-                方法详解
+              <button className="is-on" type="button">
+                问答
               </button>
             </div>
             <button
@@ -311,66 +369,43 @@ export function Workspace({ file, preview, onReset, onLoadPreview }: WorkspacePr
             >
               <TreeIcon />
             </button>
-            <button
-              className="ghost-btn"
-              type="button"
-              disabled={preview || !paperId}
-              onClick={() => void onRefresh()}
-            >
-              <RefreshIcon />
-              刷新
-            </button>
           </div>
-          {waiting ? <div className="progress-track"><div className="progress-bar" /></div> : null}
-          <div className="analysis-body">
+          {waiting || (!preview && paper?.status === "ready" && (paper.index_status === "pending" || !paper.index_status)) ? (
+            <div className="progress-track">
+              <div className="progress-bar" />
+            </div>
+          ) : null}
+          <div className="analysis-body is-ask">
             {notice && !preview ? (
-              <div className={`callout${/M1|M2|实现|ingest/.test(notice) ? " is-info" : " is-bad"}`}>
+              <div className={`callout${/M1|M2|实现|ingest/.test(notice) ? " is-info" : " is-bad"}`} style={{ margin: "16px 16px 0" }}>
                 <div>{notice}。左侧仍可阅读刚上传的 PDF。</div>
                 <button className="ghost-btn" type="button" onClick={onLoadPreview} style={{ marginTop: 8, color: "inherit" }}>
-                  查看讲解界面预览
+                  查看问答界面预览
                 </button>
               </div>
             ) : null}
-            {paper?.status === "needs_ocr" ? (
-              <div className="callout is-bad">扫描件文本过少，请换可复制文本的 PDF。不会生成介绍或方法。</div>
-            ) : null}
-            {waiting && !notice ? (
-              <div className="skeleton">
-                <div className="skel" style={{ width: "70%", height: 22 }} />
-                <div className="skel" style={{ width: "100%" }} />
-                <div className="skel" style={{ width: "92%" }} />
-                <div className="skel" style={{ width: "84%" }} />
-                <div className="skel" style={{ width: "60%", marginTop: 18 }} />
-              </div>
-            ) : null}
-            {intro || method || sections.length || (!waiting && !notice) ? (
-              tab === "intro" ? (
-              <IntroPanel
-                intro={intro}
-                sections={sections}
-                figures={figures}
-                paperId={preview ? "demo" : paperId}
-                preview={preview}
-                onJump={jumpToPage}
-                onOpenFigure={setLightbox}
-                onJumpSectionTitle={(title) => {
-                  const hit = sections.find((section) => section.title === title);
-                  if (hit) jumpToSection(hit.page_start, hit.section_id);
-                }}
-              />
-              ) : (
-              <MethodPanel
-                method={method}
-                sections={sections}
-                figures={figures}
-                paperId={preview ? "demo" : paperId}
-                preview={preview}
-                focusSectionId={focusSection}
-                onJump={jumpToPage}
-                onOpenFigure={setLightbox}
-              />
-              )
-            ) : null}
+            <AskPanel
+              paperId={preview ? "demo" : paperId}
+              preview={preview}
+              ready={Boolean(askReady)}
+              blockedReason={askBlocked}
+              indexHint={askHint}
+              indexStatus={preview ? "ready" : paper?.index_status ?? "pending"}
+              figures={figures}
+              messages={askMessages}
+              onMessages={setAskMessages}
+              onJump={onAskJump}
+              onOpenFigure={setLightbox}
+              onOpenPaper={preview ? undefined : openLibraryPaper}
+              onRebuildIndex={
+                preview || !paperId
+                  ? undefined
+                  : async () => {
+                      await rebuildPaperIndex(paperId);
+                      setIngestGen((value) => value + 1);
+                    }
+              }
+            />
           </div>
         </section>
       </div>
@@ -393,8 +428,7 @@ function statusChips(
   if (preview) {
     return [
       { label: "界面预览", tone: "run" },
-      { label: "介绍就绪", tone: "ok" },
-      { label: "方法就绪", tone: "ok" },
+      { label: "问答示意", tone: "ok" },
     ];
   }
   const chips: Chip[] = [];
@@ -416,18 +450,15 @@ function statusChips(
             ? "bad"
             : "run",
     });
-    chips.push(explainChip("介绍", paper.intro_status));
-    chips.push(explainChip("方法", paper.method_status));
+    if (paper.translate_status === "ready" || paper.translate_status === "partial") {
+      chips.push({
+        label: paper.translate_status === "partial" ? "译文部分" : "译文就绪",
+        tone: paper.translate_status === "partial" ? "warn" : "ok",
+      });
+    }
+    chips.push({ label: "问答待接入", tone: "mute" });
   } else if (notice) {
     chips.push({ label: "等待解析接口", tone: "warn" });
   }
   return chips;
-}
-
-function explainChip(name: string, status: Paper["intro_status"]): Chip {
-  if (status === "ready") return { label: `${name}就绪`, tone: "ok" };
-  if (status === "partial") return { label: `${name}部分`, tone: "warn" };
-  if (status === "failed") return { label: `${name}失败`, tone: "bad" };
-  if (status === "skipped") return { label: `${name}跳过`, tone: "mute" };
-  return { label: `${name}生成中`, tone: "run" };
 }

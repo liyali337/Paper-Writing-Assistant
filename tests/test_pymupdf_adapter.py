@@ -95,3 +95,29 @@ def test_clip_formula_items_renders_png(tmp_path) -> None:
     assert out[0].width_px >= 24
     assert out[0].height_px >= 16
     assert out[0].source == "page_clip"
+
+
+def test_clip_formula_items_still_clips_when_latex_exists(tmp_path) -> None:
+    import pymupdf
+
+    from dl_agent.knowledge.adapters.pdf.pymupdf_adapter import clip_formula_items
+    from dl_agent.knowledge.layout import LayoutItem
+
+    pdf_path = tmp_path / "eq2.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 200), "E = mc^2", fontsize=18)
+    doc.save(pdf_path)
+    doc.close()
+
+    items = [
+        LayoutItem(
+            kind="formula",
+            page=1,
+            text=r"E=mc^{2}",
+            bbox=(60, 180, 180, 220),
+        )
+    ]
+    out = clip_formula_items(str(pdf_path), items)
+    assert out[0].image_bytes
+    assert out[0].text == r"E=mc^{2}"

@@ -6,6 +6,6 @@
   ],
   "scripts": {
     "dev:web": "npm run dev -w paper-understanding-web",
-    "dev:api": ".venv/bin/dl-agent-api"
+    "dev:api": ".venv\\Scripts\\python.exe -m uvicorn dl_agent.api.main:app --app-dir src --host 0.0.0.0 --port 8000 --reload --reload-dir src"
   }
 }

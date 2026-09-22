@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from dl_agent.domain.models import Figure, Paper, PaperTranslation, Section
+from dl_agent.domain.models import ChildChunk, Figure, Paper, PaperTranslation, Section
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -82,6 +82,23 @@ class FilePaperStore:
         except (ValidationError, json.JSONDecodeError):
             return None
 
+    def list_papers(self) -> list[Paper]:
+        """按 paper.json 修改时间倒序，最新上传/解析的在前。"""
+        papers_root = self.root / "papers"
+        if not papers_root.exists():
+            return []
+        ranked: list[tuple[float, Paper]] = []
+        for child in papers_root.iterdir():
+            if not child.is_dir():
+                continue
+            paper = self.get_paper(child.name)
+            if paper is None:
+                continue
+            meta = child / "paper.json"
+            ranked.append((meta.stat().st_mtime, paper))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [paper for _, paper in ranked]
+
     def save_sections(self, paper_id: str, sections: list[Section]) -> None:
         path = self._paper_dir(paper_id, create=True) / "sections.json"
         payload = [item.model_dump() for item in sections]
@@ -151,5 +168,45 @@ class FilePaperStore:
 
     def delete_translation(self, paper_id: str) -> None:
         path = self._paper_dir(paper_id) / "translations.json"
+        if path.exists():
+            path.unlink()
+
+    def save_chunks(
+        self,
+        paper_id: str,
+        chunks: list[ChildChunk],
+        *,
+        embedding_version: str,
+        source_hash: str,
+    ) -> None:
+        path = self._paper_dir(paper_id, create=True) / "chunks.json"
+        payload = {
+            "embedding_version": embedding_version,
+            "source_hash": source_hash,
+            "chunks": [item.model_dump() for item in chunks],
+        }
+        _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def get_chunk_manifest(self, paper_id: str) -> dict | None:
+        path = self._paper_dir(paper_id) / "chunks.json"
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        return raw
+
+    def get_chunks(self, paper_id: str) -> list[ChildChunk]:
+        manifest = self.get_chunk_manifest(paper_id)
+        if not manifest:
+            return []
+        raw = manifest.get("chunks") or []
+        return [ChildChunk.model_validate(item) for item in raw]
+
+    def delete_chunks(self, paper_id: str) -> None:
+        path = self._paper_dir(paper_id) / "chunks.json"
         if path.exists():
             path.unlink()

@@ -302,12 +302,8 @@ def _clip_formula_items(document, items: list[LayoutItem]) -> list[LayoutItem]:
     import pymupdf as fitz
     from PIL import Image
 
-    from dl_agent.knowledge.formula_latex import looks_like_latex
-
     for item in items:
         if item.kind != "formula" or item.image_bytes:
-            continue
-        if looks_like_latex(item.text):
             continue
         page = document[item.page - 1]
         clip = _formula_clip_rect(page, item.bbox)

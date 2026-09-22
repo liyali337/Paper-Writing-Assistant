@@ -11,3 +11,11 @@ def test_health_ok() -> None:
     body = response.json()
     assert body["status"] == "ok"
     assert body["service"] == "dl-agent"
+
+
+def test_root_ok() -> None:
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["health"] == "/health"

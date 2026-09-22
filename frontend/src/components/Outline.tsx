@@ -1,4 +1,5 @@
 import type { Section } from "../api/types";
+import { isMetaSection } from "./SectionReader";
 
 type Props = {
   sections: Section[];
@@ -20,7 +21,7 @@ export function Outline({ sections, activePage, onJump }: Props) {
 
   return (
     <div className="outline-list">
-      {sections.map((section) => {
+      {sections.filter((section) => !isMetaSection(section)).map((section) => {
         const on = activePage >= section.page_start && activePage <= section.page_end;
         return (
           <button

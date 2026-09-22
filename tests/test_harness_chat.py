@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from dl_agent.config import Settings
-from dl_agent.harness.complete import LlmRequestError, chat
+from dl_agent.harness.complete import LlmRequestError, chat, chat_turn
 
 
 class _FakeResponse:
@@ -93,6 +93,75 @@ def test_dashscope_uses_openai_compat(monkeypatch) -> None:
     assert "x-goog-api-key" not in capture["headers"]
 
 
+def test_openai_compat_sends_image_url(monkeypatch) -> None:
+    capture: dict = {}
+    response = _FakeResponse(
+        200,
+        {"choices": [{"message": {"content": '{"latex":"a=b"}'}}]},
+    )
+    monkeypatch.setattr(httpx, "Client", lambda timeout: _FakeClient(response, capture))
+    settings = Settings(
+        openai_api_key="sk-test-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model_name="qwen3.8-max",
+        llm_timeout_s=10,
+    )
+    out = chat(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "transcribe"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aaaa"},
+                    },
+                ],
+            }
+        ],
+        settings=settings,
+        model="qwen-vl-plus",
+    )
+    assert "latex" in out
+    assert capture["json"]["model"] == "qwen-vl-plus"
+    content = capture["json"]["messages"][0]["content"]
+    assert content[1]["type"] == "image_url"
+
+
+def test_gemini_native_sends_inline_image(monkeypatch) -> None:
+    capture: dict = {}
+    response = _FakeResponse(
+        200,
+        {"candidates": [{"content": {"parts": [{"text": '{"latex":"a=b"}'}]}}]},
+    )
+    monkeypatch.setattr(httpx, "Client", lambda timeout: _FakeClient(response, capture))
+    settings = Settings(
+        openai_api_key="AQ.test-key",
+        openai_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        model_name="gemini-3.6-flash",
+        llm_timeout_s=10,
+    )
+    chat(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "transcribe"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aaaa"},
+                    },
+                ],
+            }
+        ],
+        settings=settings,
+    )
+    parts = capture["json"]["contents"][0]["parts"]
+    assert parts[0] == {"text": "transcribe"}
+    assert parts[1]["inlineData"]["mimeType"] == "image/png"
+    assert parts[1]["inlineData"]["data"] == "aaaa"
+
+
 def test_timeout_raises_fatal(monkeypatch) -> None:
     class _TimeoutClient:
         def __init__(self, *args, **kwargs):
@@ -118,3 +187,90 @@ def test_timeout_raises_fatal(monkeypatch) -> None:
     with pytest.raises(LlmRequestError) as exc:
         chat([{"role": "user", "content": "hi"}], settings=settings)
     assert "超时" in str(exc.value)
+
+
+def test_chat_turn_sends_tools_and_parses_calls(monkeypatch) -> None:
+    capture: dict = {}
+    response = _FakeResponse(
+        200,
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "retrieve_parent_chunks",
+                                    "arguments": '{"section_id":"s-method"}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(httpx, "Client", lambda timeout: _FakeClient(response, capture))
+    settings = Settings(
+        openai_api_key="sk-test-key",
+        openai_base_url="https://api.deepseek.com/v1",
+        model_name="deepseek-chat",
+        llm_timeout_s=10,
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "retrieve_parent_chunks",
+                "parameters": {"type": "object", "properties": {"section_id": {"type": "string"}}},
+            },
+        }
+    ]
+    turn = chat_turn(
+        [{"role": "user", "content": "hi"}],
+        settings=settings,
+        tools=tools,
+    )
+    assert capture["json"]["tools"] == tools
+    assert capture["json"]["tool_choice"] == "auto"
+    assert turn.content == ""
+    assert turn.tool_calls[0].id == "call_1"
+    assert turn.tool_calls[0].name == "retrieve_parent_chunks"
+    assert turn.tool_calls[0].arguments["section_id"] == "s-method"
+
+
+def test_chat_rejects_tool_only_turn(monkeypatch) -> None:
+    capture: dict = {}
+    response = _FakeResponse(
+        200,
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "search_child_chunks", "arguments": '{"query":"q"}'},
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(httpx, "Client", lambda timeout: _FakeClient(response, capture))
+    settings = Settings(
+        openai_api_key="sk-test-key",
+        openai_base_url="https://api.deepseek.com/v1",
+        model_name="deepseek-chat",
+        llm_timeout_s=10,
+        llm_max_retries=1,
+    )
+    with pytest.raises(LlmRequestError) as exc:
+        chat([{"role": "user", "content": "hi"}], settings=settings)
+    assert "空内容" in str(exc.value)

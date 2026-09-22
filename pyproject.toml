@@ -2,7 +2,7 @@
 name = "dl-agent"
 version = "0.1.0"
 description = "论文理解：上传 PDF，按标题分解并生成中文介绍与带图方法详解"
-readme = "docs/论文理解-技术方案.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",
@@ -18,6 +18,17 @@ dependencies = [
 parse = [
   "docling>=2.50",
   "pymupdf>=1.24",
+]
+rag = [
+  "qdrant-client>=1.12",
+  "fastembed>=0.4",
+  "sentence-transformers>=3.0",
+]
+agent = [
+  "langgraph>=1.0,<2",
+]
+obs = [
+  "langfuse>=4.0",
 ]
 dev = [
   "pytest>=8.3",

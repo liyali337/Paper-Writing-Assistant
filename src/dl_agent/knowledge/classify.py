@@ -56,12 +56,30 @@ def heading_level(title: str, tree_level: int = 1) -> int:
     return max(1, min(int(tree_level or 1), 6))
 
 
+_BODY_SECTION_KINDS = frozenset({"abstract", "intro", "related", "conclusion", "references"})
+
+
 def classify_kind(title: str) -> SectionKind:
     body = strip_heading_number(title)
     for kind, pattern in _KIND_RULES:
         if pattern.search(body):
             return kind
     return "other"
+
+
+def looks_like_paper_title_heading(title: str) -> bool:
+    """首页未编号长标题（常含 model/method 等词）不应当成章节。"""
+    text = title.strip()
+    if not text or len(text) > 220:
+        return False
+    if re.match(r"^(?:\d+(?:\.\d+)*|[IVXLC]{1,6})[.\s:-]", text, re.I):
+        return False
+    kind = classify_kind(text)
+    if kind in _BODY_SECTION_KINDS:
+        return False
+    if kind in {"method", "experiment"} and len(text) < 60:
+        return False
+    return True
 
 
 def is_skip_heading(title: str) -> bool:

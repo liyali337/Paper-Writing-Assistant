@@ -1,8 +1,12 @@
 import type {
+  AskRequest,
+  Evidence,
   Figure,
   Health,
+  LibraryHit,
   MethodExplain,
   Paper,
+  PaperAnswer,
   PaperIntro,
   PaperTranslation,
   Section,
@@ -12,8 +16,9 @@ import { HttpError, type ApiError } from "./types";
 export type { Figure, Health, MethodExplain, Paper, PaperIntro, PaperTranslation, Section };
 export { HttpError };
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, init);
+async function request<T>(path: string, init?: RequestInit, timeoutMs = 15000): Promise<T> {
+  const signal = init?.signal ?? AbortSignal.timeout(timeoutMs);
+  const response = await fetch(`/api${path}`, { ...init, signal });
   const payload = await response.json().catch(() => null);
   if (response.status === 202) {
     throw new HttpError(202, "pending");
@@ -33,13 +38,14 @@ export function getHealth() {
   return request<Health>("/health");
 }
 
+export function listPapers() {
+  return request<Paper[]>("/papers", undefined, 8000);
+}
+
 export function uploadPaper(file: File) {
   const body = new FormData();
   body.append("file", file);
-  return request<{ paper_id: string; status: string }>("/papers", {
-    method: "POST",
-    body,
-  });
+  return request<{ paper_id: string; status: string }>("/papers", { method: "POST", body }, 120000);
 }
 
 export function getPaper(paperId: string) {
@@ -79,6 +85,52 @@ export function reparsePaper(paperId: string) {
   });
 }
 
+export function rebuildPaperIndex(paperId: string) {
+  return request<Paper>(`/papers/${paperId}/index`, { method: "POST" });
+}
+
+export function searchPaper(paperId: string, q: string, k?: number) {
+  const params = new URLSearchParams({ q });
+  if (k) params.set("k", String(k));
+  return request<Evidence[]>(`/papers/${paperId}/search?${params.toString()}`);
+}
+
+export function askPaper(paperId: string, body: AskRequest) {
+  return request<PaperAnswer>(
+    `/papers/${paperId}/ask`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: body.question,
+        history: body.history ?? [],
+      }),
+    },
+    180000,
+  );
+}
+
+export function searchLibrary(q: string, k?: number) {
+  const params = new URLSearchParams({ q });
+  if (k) params.set("k", String(k));
+  return request<LibraryHit[]>(`/library/search?${params.toString()}`);
+}
+
+export function askLibrary(body: AskRequest) {
+  return request<PaperAnswer>(
+    "/library/ask",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: body.question,
+        history: body.history ?? [],
+      }),
+    },
+    180000,
+  );
+}
+
 export function figureUrl(paperId: string, figureId: string) {
   return `/api/papers/${paperId}/figures/${figureId}`;
 }
@@ -98,9 +150,15 @@ export function getTranslations(paperId: string) {
   return request<PaperTranslation>(`/papers/${paperId}/translations`);
 }
 
+export function cancelTranslations(paperId: string) {
+  return request<PaperTranslation>(`/papers/${paperId}/translations/cancel`, {
+    method: "POST",
+  });
+}
+
 export async function ensureTranslations(paperId: string): Promise<PaperTranslation> {
   let payload = await startTranslations(paperId);
-  if (payload.status === "ready" || payload.status === "partial") {
+  if (payload.status === "ready" || payload.status === "partial" || payload.status === "cancelled") {
     return payload;
   }
   if (payload.status === "failed") {
@@ -110,7 +168,7 @@ export async function ensureTranslations(paperId: string): Promise<PaperTranslat
   for (let attempt = 0; attempt < 300; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 3000));
     payload = await getTranslations(paperId);
-    if (payload.status === "ready" || payload.status === "partial") {
+    if (payload.status === "ready" || payload.status === "partial" || payload.status === "cancelled") {
       return payload;
     }
     if (payload.status === "failed") {

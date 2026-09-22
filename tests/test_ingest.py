@@ -9,7 +9,7 @@ from tests.helpers import make_png
 
 
 def _service(tmp_path: Path, parse_fn) -> KnowledgeService:
-    settings = Settings(data_dir=tmp_path)
+    settings = Settings(data_dir=tmp_path, formula_vision_enabled=False)
     return KnowledgeService(FilePaperStore(tmp_path), settings, parse_fn=parse_fn)
 
 
@@ -49,6 +49,7 @@ def test_ingest_ready_binds_figure(tmp_path: Path) -> None:
     pdf = _minimal_text_pdf()
     paper = svc.ingest(pdf, "demo.pdf")
     assert paper.status == "ready"
+    assert paper.index_status == "ready"
     assert paper.parser == "pymupdf"
     assert paper.figure_count == 1
     assert paper.intro_status == "skipped"
@@ -67,6 +68,13 @@ def test_ingest_ready_binds_figure(tmp_path: Path) -> None:
     second, run_second = svc.start_ingest(pdf, "demo.pdf")
     assert first.paper_id == second.paper_id == paper.paper_id
     assert run_first is False and run_second is False
+
+    svc.delete_index(paper.paper_id)
+    assert svc.get_paper(paper.paper_id).index_status == "pending"
+    rebuilt = svc.ingest(pdf, "demo.pdf")
+    assert rebuilt.paper_id == paper.paper_id
+    assert rebuilt.index_status == "ready"
+    assert calls["n"] == 1
 
 
 def test_reparse_ignores_sha_dedup(tmp_path: Path) -> None:
@@ -102,8 +110,54 @@ def test_scan_marked_needs_ocr(tmp_path: Path) -> None:
     svc = _service(tmp_path, parse)
     paper = svc.ingest(_minimal_text_pdf(), "scan.pdf")
     assert paper.status == "needs_ocr"
+    assert paper.index_status == "skipped"
     assert paper.intro_status == "skipped"
     assert paper.method_status == "skipped"
+
+
+def test_ingest_repairs_broken_formula_with_vision(tmp_path: Path) -> None:
+    body = "This sentence is long enough to count as paper text. " * 20
+
+    def parse(_path: str) -> ParseResult:
+        return ParseResult(
+            parser="pymupdf",
+            page_count=1,
+            items=[
+                LayoutItem(kind="heading", page=1, text="1. Method", level=1),
+                LayoutItem(kind="text", page=1, text=body),
+                LayoutItem(
+                    kind="formula",
+                    page=1,
+                    text=r"L_{C} F_{i} _{j}. i,j\in",
+                    image_bytes=make_png(240, 48),
+                    width_px=240,
+                    height_px=48,
+                    bbox=(80, 200, 320, 230),
+                ),
+            ],
+        )
+
+    def fake_chat(messages, **_kwargs):
+        return r'{"latex": "\\sum_{i,j} L_{C}(F_i, F_j)"}'
+
+    settings = Settings(
+        data_dir=tmp_path,
+        openai_api_key="sk-test",
+        formula_vision_enabled=True,
+        formula_vision_model="qwen-vl-plus",
+    )
+    svc = KnowledgeService(
+        FilePaperStore(tmp_path),
+        settings,
+        parse_fn=parse,
+        chat_fn=fake_chat,
+    )
+    paper = svc.ingest(_minimal_text_pdf(), "demo.pdf")
+    assert paper.status == "ready"
+    text = svc.get_sections(paper.paper_id)[0].text
+    assert r"\sum_{i,j}" in text
+    assert "<!--fig:" not in text
+    assert paper.figure_count == 0
 
 
 def _minimal_text_pdf() -> bytes:

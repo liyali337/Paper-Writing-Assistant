@@ -7,7 +7,8 @@ PaperStatus = Literal[
 ]
 ParserName = Literal["docling", "pymupdf"]
 ExplainStatus = Literal["pending", "ready", "failed", "skipped", "partial"]
-TranslateStatus = Literal["pending", "ready", "failed", "partial"]
+TranslateStatus = Literal["pending", "ready", "failed", "partial", "cancelled"]
+IndexStatus = Literal["pending", "ready", "failed", "skipped"]
 SectionKind = Literal[
     "abstract",
     "intro",
@@ -37,6 +38,9 @@ class Paper(BaseModel):
     intro_status: ExplainStatus = "pending"
     method_status: ExplainStatus = "pending"
     translate_status: TranslateStatus = "pending"
+    index_status: IndexStatus = "pending"
+    index_error: str | None = None
+    embedding_version: str | None = None
 
 
 class Section(BaseModel):
@@ -50,6 +54,20 @@ class Section(BaseModel):
     text: str
     parent_id: str | None = None
     figure_ids: list[str] = Field(default_factory=list)
+
+
+class ChildChunk(BaseModel):
+    chunk_id: str
+    paper_id: str
+    section_id: str
+    section_title: str
+    section_kind: str
+    page_start: int
+    page_end: int
+    text: str
+    figure_ids: list[str] = Field(default_factory=list)
+    order: int = 0
+    source_hash: str = ""
 
 
 class Figure(BaseModel):
@@ -72,6 +90,20 @@ class Evidence(BaseModel):
     section_title: str | None = None
     quote: str
     sourced: bool
+    section_id: str | None = None
+    score: float | None = None
+    figure_ids: list[str] = Field(default_factory=list)
+    chunk_id: str | None = None
+
+
+class ExternalRef(BaseModel):
+    source: Literal["arxiv", "asta", "web"]
+    title: str
+    url: str | None = None
+    identifier: str | None = None
+    snippet: str = ""
+    year: int | None = None
+    authors: list[str] = Field(default_factory=list)
 
 
 class PaperIntro(BaseModel):
@@ -125,6 +157,11 @@ class SectionTranslation(BaseModel):
     chunks_total: int = 0
 
 
+class FigureTranslation(BaseModel):
+    figure_id: str
+    caption_zh: str
+
+
 class PaperTranslation(BaseModel):
     paper_id: str
     status: TranslateStatus
@@ -132,4 +169,44 @@ class PaperTranslation(BaseModel):
     prompt_version: str
     title_zh: str | None = None
     sections: list[SectionTranslation] = Field(default_factory=list)
+    figures: list[FigureTranslation] = Field(default_factory=list)
     error: str | None = None
+
+
+class AskTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class AskRequest(BaseModel):
+    question: str
+    history: list[AskTurn] = Field(default_factory=list)
+
+
+class LibraryHit(BaseModel):
+    paper_id: str
+    title: str | None = None
+    filename: str = ""
+    authors: list[str] = Field(default_factory=list)
+    abstract: str | None = None
+    score: float | None = None
+    why: str = ""
+    section_title: str | None = None
+    openable: bool = True
+    index_status: IndexStatus = "pending"
+
+
+class PaperAnswer(BaseModel):
+    paper_id: str
+    question: str
+    answer_zh: str
+    citations: list[Evidence] = Field(default_factory=list)
+    figure_ids: list[str] = Field(default_factory=list)
+    external_refs: list[ExternalRef] = Field(default_factory=list)
+    library_hits: list[LibraryHit] = Field(default_factory=list)
+    mode: Literal["close_read", "library", "arxiv"] = "close_read"
+    no_evidence: bool = False
+    partial: bool = False
+    model: str
+    prompt_version: str
+    embedding_version: str = "lexical-v1"

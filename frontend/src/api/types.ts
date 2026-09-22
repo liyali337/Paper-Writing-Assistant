@@ -5,7 +5,9 @@ export type PaperStatus =
   | "needs_ocr"
   | "ingest_failed";
 
-export type ExplainStatus = "pending" | "ready" | "failed" | "skipped" | "partial";
+export type ExplainStatus = "pending" | "ready" | "failed" | "skipped" | "partial" | "cancelled";
+
+export type IndexStatus = "pending" | "ready" | "failed" | "skipped";
 
 export type SectionKind =
   | "abstract"
@@ -32,6 +34,9 @@ export type Paper = {
   intro_status: ExplainStatus;
   method_status: ExplainStatus;
   translate_status: ExplainStatus;
+  index_status?: IndexStatus;
+  index_error?: string | null;
+  embedding_version?: string | null;
 };
 
 export type Section = {
@@ -55,6 +60,7 @@ export type Figure = {
   kind: "figure" | "table_snapshot" | "algorithm" | "formula";
   label: string | null;
   caption: string | null;
+  caption_zh?: string | null;
   storage_key: string | null;
   source: string;
   width_px: number;
@@ -66,6 +72,59 @@ export type Evidence = {
   section_title: string | null;
   quote: string;
   sourced: boolean;
+  section_id?: string | null;
+  score?: number | null;
+  figure_ids?: string[];
+  chunk_id?: string | null;
+};
+
+export type ExternalRef = {
+  source: "arxiv" | "asta" | "web";
+  title: string;
+  url?: string | null;
+  identifier?: string | null;
+  snippet?: string;
+  year?: number | null;
+  authors?: string[];
+};
+
+export type LibraryHit = {
+  paper_id: string;
+  title?: string | null;
+  filename?: string;
+  authors?: string[];
+  abstract?: string | null;
+  score?: number | null;
+  why?: string;
+  section_title?: string | null;
+  openable?: boolean;
+  index_status?: IndexStatus;
+};
+
+export type PaperAnswer = {
+  paper_id: string;
+  question: string;
+  answer_zh: string;
+  citations: Evidence[];
+  figure_ids: string[];
+  external_refs?: ExternalRef[];
+  library_hits?: LibraryHit[];
+  mode?: "close_read" | "library" | "arxiv";
+  no_evidence: boolean;
+  partial: boolean;
+  model: string;
+  prompt_version: string;
+  embedding_version?: string;
+};
+
+export type AskTurn = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type AskRequest = {
+  question: string;
+  history?: AskTurn[];
 };
 
 export type PaperIntro = {
@@ -131,6 +190,11 @@ export type SectionTranslation = {
   chunks_total?: number;
 };
 
+export type FigureTranslation = {
+  figure_id: string;
+  caption_zh: string;
+};
+
 export type PaperTranslation = {
   paper_id: string;
   status: ExplainStatus;
@@ -138,6 +202,7 @@ export type PaperTranslation = {
   prompt_version: string;
   title_zh?: string | null;
   sections: SectionTranslation[];
+  figures?: FigureTranslation[];
   error?: string | null;
 };
 

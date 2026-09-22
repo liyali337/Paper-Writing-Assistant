@@ -398,3 +398,133 @@ def test_reference_number_glues_to_entry() -> None:
     assert "[1] A. Radford" in refs.text
     assert "[2] C. Jia" in refs.text
     assert "\n\n1\n\n" not in refs.text
+
+
+def test_model_driven_paper_title_is_not_a_method_section() -> None:
+    from dl_agent.knowledge.classify import looks_like_paper_title_heading
+
+    title = (
+        "MODAL: Multi-Modal Object Re-ID via Model-Driven Sparse "
+        "Decoupling and Text-Image Differential Filtering"
+    )
+    assert looks_like_paper_title_heading(title)
+    items = [
+        LayoutItem(kind="heading", page=1, text=title, level=1),
+        LayoutItem(
+            kind="text",
+            page=1,
+            text="Chengbo Huang, Jun-Jie Huang, Senior Member, IEEE",
+        ),
+        LayoutItem(
+            kind="text",
+            page=1,
+            text=(
+                "Abstract -Multi-modal object re-identification (Re-ID) aims to retrieve "
+                "the same object across cameras by fusing visual and textual cues. " * 2
+            ),
+        ),
+        LayoutItem(
+            kind="text",
+            page=1,
+            text="Index Terms -Object re-identification, sparse coding, multi-modal learning.",
+        ),
+        LayoutItem(kind="heading", page=1, text="I. INTRODUCTION", level=1),
+        LayoutItem(
+            kind="text",
+            page=1,
+            text=(
+                "O Bject Re-Identification (Re-ID) aims to retrieve the same individual "
+                "across cameras. Traditional methods rely on visible images."
+            ),
+        ),
+        LayoutItem(
+            kind="text",
+            page=1,
+            text=(
+                "C. Huang and J.-J. Huang are with the College of Computer Science and "
+                "Technology, National University of Defense Technology, Changsha 410073, "
+                "China (e-mail: chengbohuang@nudt.edu.cn)."
+            ),
+        ),
+        LayoutItem(
+            kind="text",
+            page=1,
+            text="M. Wang is with Hefei University of Technology (e-mail: eric.mengwang@gmail.com).",
+        ),
+        LayoutItem(
+            kind="text",
+            page=1,
+            text="Recent studies have focused on multi-modal object ReID under missing modalities.",
+        ),
+    ]
+    result = assemble("p1", items)
+    titles = [section.title for section in result.sections]
+    assert title not in titles
+    assert result.title == title
+    abstract = next(section for section in result.sections if section.kind == "abstract")
+    assert "cross cameras" in abstract.text or "re-identification" in abstract.text.lower()
+    assert "Index Terms" in abstract.text
+    intro = next(section for section in result.sections if section.kind == "intro")
+    assert intro.text.startswith("Object Re-Identification")
+    assert "are with the College" not in intro.text
+    assert "e-mail:" not in intro.text
+    assert "Recent studies" in intro.text
+    authors = "\n\n".join(section.text for section in result.sections if section.title == "Front Matter")
+    assert "Chengbo Huang" in authors
+    assert "are with the College" in authors
+
+
+def test_repair_front_matter_splits_saved_title_blob() -> None:
+    from dl_agent.domain.models import Section
+    from dl_agent.knowledge.layout import repair_front_matter
+
+    title = (
+        "MODAL: Multi-Modal Object Re-ID via Model-Driven Sparse "
+        "Decoupling and Text-Image Differential Filtering"
+    )
+    sections = [
+        Section(
+            section_id="sec-001",
+            paper_id="p",
+            title=title,
+            kind="method",
+            level=1,
+            page_start=1,
+            page_end=1,
+            text=(
+                "Chengbo Huang, Senior Member, IEEE\n\n"
+                "Abstract -Multi-modal object re-identification (Re-ID) aims to retrieve "
+                "objects across cameras.\n\n"
+                "Index Terms -Object re-identification, sparse coding."
+            ),
+        ),
+        Section(
+            section_id="sec-002",
+            paper_id="p",
+            title="I. INTRODUCTION",
+            kind="intro",
+            level=1,
+            page_start=1,
+            page_end=2,
+            text=(
+                "O Bject Re-Identification aims to match identities.\n\n"
+                "C. Huang is with the College of Computer Science, National University "
+                "of Defense Technology (e-mail: a@b.com).\n\n"
+                "Later we discuss multi-modal fusion."
+            ),
+        ),
+    ]
+    out = repair_front_matter(sections)
+    kinds = [section.kind for section in out]
+    assert "abstract" in kinds
+    title_sec = next(section for section in out if section.section_id == "sec-001")
+    assert title_sec.kind == "other"
+    assert "Abstract -" not in title_sec.text
+    assert "Chengbo Huang" in title_sec.text
+    abstract = next(section for section in out if section.kind == "abstract")
+    assert "retrieve objects" in abstract.text
+    intro = next(section for section in out if section.kind == "intro")
+    assert intro.text.startswith("Object Re-Identification")
+    assert "e-mail:" not in intro.text
+    assert "Later we discuss" in intro.text
+    assert "e-mail:" in title_sec.text
