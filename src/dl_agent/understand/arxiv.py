@@ -22,6 +22,7 @@ from dl_agent.mcp_gateway.adapters.arxiv import (
 from dl_agent.mcp_gateway.base import McpGateway
 from dl_agent.understand.citations import sanitize_answer_zh
 from dl_agent.understand.library import _parse_json_object, _recent_history
+from dl_agent.understand.progress import emit_phase
 
 ChatFn = Callable[..., str]
 
@@ -73,6 +74,7 @@ def ask_arxiv(
     question = (question or "").strip()
     if not question:
         raise ValueError("问题不能为空")
+    emit_phase("arxiv", "正在检索 arXiv")
     version = getattr(settings, "arxiv_prompt_version", None) or ARXIV_PROMPT_VERSION
     model = settings.model_name
     gw = gateway or build_gateway(settings)

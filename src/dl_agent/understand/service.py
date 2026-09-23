@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from dl_agent.config import Settings, get_settings
 from dl_agent.domain.models import AskTurn, Evidence, MethodExplain, PaperAnswer, PaperIntro
-from dl_agent.harness.complete import LlmRequestError, chat, chat_turn
+from dl_agent.harness.complete import LlmNotConfiguredError, LlmRequestError, chat, chat_turn
 from dl_agent.knowledge.service import IndexNotReadyError, KnowledgeService, PaperNotFoundError
+from dl_agent.knowledge.service import PaperNotReadyError as IngestNotReady
 from dl_agent.observability.langfuse import mark_error, observe_span
 from dl_agent.understand.citations import resolve_citations, sanitize_answer_zh
 from dl_agent.understand.arxiv import ask_arxiv as run_arxiv_ask
 from dl_agent.understand.library import ask_library as run_library_ask
+from dl_agent.understand.progress import bind_progress, emit_phase, reset_progress
 from dl_agent.understand.route import is_obvious_chat, suggest_task_kinds
 
 logger = logging.getLogger(__name__)
@@ -93,6 +97,7 @@ class UnderstandService:
     ) -> PaperAnswer:
         version = self.settings.ask_prompt_version
         model = self.settings.model_name
+        emit_phase("retrieve", "正在检索本篇")
         with observe_span(
             "ask",
             input={"paper_id": paper_id, "question": question},
@@ -379,6 +384,84 @@ class UnderstandService:
             except Exception as exc:
                 mark_error(span, exc)
                 raise
+
+    def guard_ask(self, paper_id: str, question: str, *, agent: bool) -> None:
+        """流式开始前抛出与 ask / ask_agent 相同的前置错误。"""
+        paper = self.knowledge.get_paper(paper_id)
+        question = (question or "").strip()
+        if not question:
+            raise ValueError("问题不能为空")
+        if paper.status != "ready":
+            raise PaperNotReadyError(paper.status)
+        kinds = suggest_task_kinds(question)
+        has_close = "close_read" in kinds
+        has_aux = "library" in kinds or "arxiv" in kinds
+        if not has_close or has_aux:
+            return
+        if agent and is_obvious_chat(question):
+            return
+        if paper.index_status == "pending":
+            raise IndexNotReadyError("pending")
+        if paper.index_status == "failed":
+            raise IndexNotReadyError("failed", paper.index_error)
+
+    def iter_ask_events(
+        self,
+        paper_id: str,
+        question: str,
+        history: list[AskTurn] | None = None,
+        *,
+        agent: bool,
+    ) -> Iterator[dict[str, Any]]:
+        events: queue.Queue[dict[str, Any] | object] = queue.Queue()
+        done = object()
+
+        def runner() -> None:
+            token = bind_progress(events.put)
+            try:
+                if agent:
+                    answer = self.ask_agent(paper_id, question, history)
+                else:
+                    answer = self.ask(paper_id, question, history)
+                events.put({"type": "answer", "answer": answer.model_dump(mode="json")})
+            except Exception as exc:
+                events.put(_ask_failure_event(exc))
+            finally:
+                reset_progress(token)
+                events.put(done)
+
+        thread = threading.Thread(target=runner, name="ask-stream", daemon=True)
+        thread.start()
+        while True:
+            item = events.get()
+            if item is done:
+                break
+            if isinstance(item, dict):
+                yield item
+        thread.join(timeout=5)
+
+
+def _ask_failure_event(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, PaperNotFoundError):
+        return _ask_error(404, "not_found", "论文不存在")
+    if isinstance(exc, (PaperNotReadyError, IngestNotReady)):
+        return _ask_error(409, "not_ready", "论文尚未解析完成")
+    if isinstance(exc, IndexNotReadyError):
+        if exc.status == "pending":
+            return _ask_error(409, "index_pending", "索引尚未完成")
+        return _ask_error(503, "index_failed", exc.error or "索引失败")
+    if isinstance(exc, LlmNotConfiguredError):
+        return _ask_error(503, "llm_not_configured", str(exc))
+    if isinstance(exc, LlmRequestError):
+        return _ask_error(503, "llm_request_failed", str(exc))
+    if isinstance(exc, ValueError):
+        return _ask_error(400, "invalid_request", str(exc))
+    logger.exception("ask stream failed")
+    return _ask_error(500, "ask_failed", "问答失败")
+
+
+def _ask_error(status: int, code: str, message: str) -> dict[str, Any]:
+    return {"type": "error", "status": status, "code": code, "stage": "ask", "message": message}
 
 
 def _answer_trace(answer: PaperAnswer) -> dict[str, Any]:

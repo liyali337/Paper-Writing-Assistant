@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import { askPaper, formatApiError } from "../api/client";
 import type { AskTurn, Evidence, ExternalRef, Figure, IndexStatus, LibraryHit, PaperAnswer } from "../api/types";
 import { demoAnswerFor, demoAskSuggestions } from "../data/demo";
+import { applyToolStep, liveHeadline, type AskLiveStep } from "../lib/askStream";
 import { FigureCard } from "./FigureViews";
 import { ChatIcon, SendIcon } from "./icons";
 import { MathText } from "./MathText";
@@ -12,6 +13,7 @@ export type AskMessage = {
   role: "user" | "assistant";
   text: string;
   answer?: PaperAnswer;
+  trace?: AskLiveStep[];
 };
 
 type Props = {
@@ -62,21 +64,28 @@ export function AskPanel({
 }: Props) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [liveLabel, setLiveLabel] = useState("正在检索…");
+  const [liveSteps, setLiveSteps] = useState<AskLiveStep[]>([]);
   const scroller = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const requestSeq = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const liveStepsRef = useRef<AskLiveStep[]>([]);
 
   useEffect(() => {
     requestSeq.current += 1;
+    abortRef.current?.abort();
     setDraft("");
     setBusy(false);
+    setLiveLabel("正在检索…");
+    setLiveSteps([]);
   }, [paperId, preview]);
 
   useEffect(() => {
     const node = scroller.current;
     if (!node) return;
     node.scrollTop = node.scrollHeight;
-  }, [messages, busy]);
+  }, [messages, busy, liveLabel, liveSteps]);
 
   const canAsk = ready && !busy && !blockedReason && (preview || Boolean(paperId));
   const suggestions = preview
@@ -89,8 +98,14 @@ export function AskPanel({
     const history = toHistory(messages);
     const seq = requestSeq.current;
     const userMsg: AskMessage = { id: nextId(), role: "user", text };
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     onMessages((current) => [...current, userMsg]);
     setDraft("");
+    setLiveLabel("正在检索…");
+    liveStepsRef.current = [];
+    setLiveSteps([]);
     setBusy(true);
     try {
       let answer: PaperAnswer;
@@ -99,18 +114,41 @@ export function AskPanel({
       } else if (!paperId) {
         return;
       } else {
-        answer = await askPaper(paperId, { question: text, history });
+        answer = await askPaper(
+          paperId,
+          { question: text, history },
+          (event) => {
+            if (seq !== requestSeq.current) return;
+            if (event.type === "phase") setLiveLabel(event.label);
+            if (event.type === "tool") {
+              liveStepsRef.current = applyToolStep(liveStepsRef.current, event);
+              setLiveSteps(liveStepsRef.current);
+            }
+          },
+          controller.signal,
+        );
       }
       if (seq !== requestSeq.current) return;
       onMessages((current) => [
         ...current,
-        { id: nextId(), role: "assistant", text: answer.answer_zh, answer },
+        {
+          id: nextId(),
+          role: "assistant",
+          text: answer.answer_zh,
+          answer,
+          trace: liveStepsRef.current,
+        },
       ]);
     } catch (error) {
       if (seq !== requestSeq.current) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      const text =
+        error instanceof DOMException && error.name === "TimeoutError"
+          ? "问答超时，请稍后重试"
+          : formatApiError(error);
       onMessages((current) => [
         ...current,
-        { id: nextId(), role: "assistant", text: formatApiError(error) },
+        { id: nextId(), role: "assistant", text },
       ]);
     } finally {
       if (seq === requestSeq.current) {
@@ -201,13 +239,16 @@ export function AskPanel({
         )}
 
         {busy ? (
-          <div className="ask-bubble is-assistant is-pending">
-            <span className="ask-typing" aria-hidden>
-              <i />
-              <i />
-              <i />
-            </span>
-            正在检索…
+          <div className="ask-bubble is-assistant is-pending" aria-live="polite">
+            <div className="ask-live-head">
+              <span className="ask-typing" aria-hidden>
+                <i />
+                <i />
+                <i />
+              </span>
+              {liveHeadline(liveLabel, liveSteps)}
+            </div>
+            {liveSteps.length ? <ToolTrace steps={liveSteps} /> : null}
           </div>
         ) : null}
       </div>
@@ -228,6 +269,23 @@ export function AskPanel({
         </button>
       </form>
     </div>
+  );
+}
+
+function ToolTrace({ steps }: { steps: AskLiveStep[] }) {
+  return (
+    <ol className="ask-steps">
+      {steps.map((step) => (
+        <li key={step.id} className={`ask-step is-${step.status}`}>
+          <i className="ask-step-mark" />
+          <span className="ask-step-text">
+            <span>{step.label}</span>
+            {step.detail ? <span className="ask-step-detail"> {step.detail}</span> : null}
+            {step.status !== "start" && step.note ? <span className="ask-step-note"> · {step.note}</span> : null}
+          </span>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -257,6 +315,7 @@ function AssistantBubble({
 
   return (
     <div className={`ask-bubble is-assistant${answer?.no_evidence || !answer ? " is-muted" : ""}`}>
+      {message.trace?.length ? <ToolTrace steps={message.trace} /> : null}
       <div className="ask-answer">
         <MathText text={message.text} layout="ask" />
       </div>

@@ -1440,9 +1440,74 @@ button {
 }
 
 .ask-bubble.is-pending {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--muted);
+  min-width: 220px;
+}
+
+.ask-live-head {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+}
+
+.ask-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ask-bubble.is-assistant:not(.is-pending) .ask-steps {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ask-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.ask-step-mark {
+  width: 7px;
+  height: 7px;
+  margin-top: 0.45em;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.4;
+  flex: none;
+}
+
+.ask-step.is-start .ask-step-mark {
+  opacity: 1;
+  animation: ask-dot 1s ease-in-out infinite;
+}
+
+.ask-step.is-done .ask-step-mark {
+  opacity: 0.9;
+  background: var(--accent);
+}
+
+.ask-step.is-skip {
+  opacity: 0.72;
+}
+
+.ask-step-text {
+  min-width: 0;
+}
+
+.ask-step-detail,
+.ask-step-note {
   color: var(--muted);
 }
 

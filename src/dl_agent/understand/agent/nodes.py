@@ -34,6 +34,7 @@ from dl_agent.understand.agent.state import (
 )
 from dl_agent.understand.agent.tools import BOOTSTRAP_SEARCH_CALL_ID, RetrievalTools
 from dl_agent.understand.citations import rank_evidence_for_prompt, resolve_citations, sanitize_answer_zh
+from dl_agent.understand.progress import emit_phase, emit_tool, outcome_note
 from dl_agent.understand.route import is_obvious_chat, primary_ask_mode, suggest_task_kinds
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,12 @@ def estimate_tokens(state: WorkerState) -> int:
 
 def bootstrap_search(state: WorkerState, tools: RetrievalTools) -> dict[str, Any]:
     question = (state.get("question") or "").strip()
+    emit_tool(
+        name="search_child_chunks",
+        status="start",
+        call_id=BOOTSTRAP_SEARCH_CALL_ID,
+        args={"query": question},
+    )
     with observe_span(
         "search_child_chunks",
         as_type="tool",
@@ -95,6 +102,14 @@ def bootstrap_search(state: WorkerState, tools: RetrievalTools) -> dict[str, Any
         text = tools.search_child_chunks(question)
         span.update(output=clip_value(text))
         logger.info("ask tool name=search_child_chunks bootstrap=true")
+    hits = list(tools.last_child_hits)
+    emit_tool(
+        name="search_child_chunks",
+        status="done",
+        call_id=BOOTSTRAP_SEARCH_CALL_ID,
+        args={"query": question},
+        note=outcome_note(text, len(hits)),
+    )
     return {
         "messages": [
             {"role": "user", "content": question},
@@ -123,6 +138,7 @@ def bootstrap_search(state: WorkerState, tools: RetrievalTools) -> dict[str, Any
 
 
 def orchestrator(state: WorkerState, model: WorkerModel) -> dict[str, Any]:
+    emit_phase("orchestrator", "正在决定下一步")
     reply = model.orchestrate(
         list(state.get("messages") or []),
         state.get("question") or "",
@@ -160,14 +176,32 @@ def run_tools(state: WorkerState, tools: RetrievalTools) -> dict[str, Any]:
     for call in last.get("tool_calls") or []:
         name = str(call.get("name") or "")
         args = call.get("args") or {}
+        if not isinstance(args, dict):
+            args = {}
+        call_id = str(call.get("id") or call.get("tool_call_id") or "")
         key, skipped = _tool_dedup_key(name, args)
         if skipped:
             content = skipped
             logger.info("ask tool name=%s skipped=invalid", name or "tool")
+            emit_tool(
+                name=name,
+                status="skip",
+                call_id=call_id,
+                args=args,
+                note=outcome_note(content, skipped="invalid"),
+            )
         elif key and key in known:
             content = f"(skipped duplicate {name})"
             logger.info("ask tool name=%s skipped=duplicate", name or "tool")
+            emit_tool(
+                name=name,
+                status="skip",
+                call_id=call_id,
+                args=args,
+                note=outcome_note(content, skipped="duplicate"),
+            )
         else:
+            emit_tool(name=name, status="start", call_id=call_id, args=args)
             with observe_span(name or "tool", as_type="tool", input=args) as span:
                 content, hits, extra_refs, unknown = _invoke_tool(tools, name, args)
                 if unknown:
@@ -183,6 +217,13 @@ def run_tools(state: WorkerState, tools: RetrievalTools) -> dict[str, Any]:
                     executed += 1
                     span.update(output=clip_value(content))
                     logger.info("ask tool name=%s executed=true", name or "tool")
+            emit_tool(
+                name=name,
+                status="done",
+                call_id=call_id,
+                args=args,
+                note=outcome_note(content, len(hits)),
+            )
         out.append(
             {
                 "role": "tool",
@@ -232,6 +273,7 @@ def compress_context(state: WorkerState, model: WorkerModel) -> dict[str, Any]:
 
 
 def fallback_response(state: WorkerState, model: WorkerModel) -> dict[str, Any]:
+    emit_phase("fallback", "正在根据已有证据作答")
     seen: set[str] = set()
     chunks: list[str] = []
     for item in state.get("messages") or []:
@@ -326,6 +368,7 @@ def pack_dialogue_memory(
 
 
 def dialogue_query(state: AskState, model: AskModel, settings: Settings) -> dict[str, Any]:
+    emit_phase("dialogue", "正在理解问题")
     original = (state.get("originalQuery") or "").strip()
     history = list(state.get("history") or [])
     if is_obvious_chat(original):
@@ -371,6 +414,7 @@ def rewrite_query(state: AskState, model: AskModel, settings: Settings) -> dict[
 
 
 def direct_reply(state: AskState) -> dict[str, Any]:
+    emit_phase("direct_reply", "正在回答")
     return {
         "answer_zh": sanitize_answer_zh(state.get("answer_zh") or CHAT_IDENTITY_REPLY),
         "citations": list(state.get("citations") or []),
@@ -441,6 +485,7 @@ def _plan_tasks_from_act(
 
 
 def aggregate_answers(state: AskState, model: AskModel) -> dict[str, Any]:
+    emit_phase("aggregate", "正在整理回答")
     answers = sorted(list(state.get("agent_answers") or []), key=lambda item: int(item.get("index") or 0))
     evidence: list[Evidence] = []
     refs: list[ExternalRef] = []

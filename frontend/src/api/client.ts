@@ -1,3 +1,5 @@
+import type { AskStreamEvent } from "../lib/askStream";
+import { parseSseBlocks } from "../lib/askStream";
 import type {
   AskRequest,
   Evidence,
@@ -95,19 +97,75 @@ export function searchPaper(paperId: string, q: string, k?: number) {
   return request<Evidence[]>(`/papers/${paperId}/search?${params.toString()}`);
 }
 
-export function askPaper(paperId: string, body: AskRequest) {
-  return request<PaperAnswer>(
-    `/papers/${paperId}/ask`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question: body.question,
-        history: body.history ?? [],
-      }),
+export async function askPaper(
+  paperId: string,
+  body: AskRequest,
+  onEvent?: (event: AskStreamEvent) => void,
+  signal?: AbortSignal,
+) {
+  const timeout = AbortSignal.timeout(180000);
+  const merged = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const response = await fetch(`/api/papers/${paperId}/ask/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
     },
-    180000,
-  );
+    body: JSON.stringify({
+      question: body.question,
+      history: body.history ?? [],
+    }),
+    signal: merged,
+  });
+  const payload = await readAskStream(response, onEvent);
+  return payload;
+}
+
+async function readAskStream(
+  response: Response,
+  onEvent?: (event: AskStreamEvent) => void,
+): Promise<PaperAnswer> {
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const detail = payload?.detail as ApiError | undefined;
+    throw new HttpError(
+      response.status,
+      detail?.message || `HTTP ${response.status}`,
+      detail && typeof detail === "object" ? detail : undefined,
+    );
+  }
+  if (!response.body) {
+    throw new Error("连接中断，未收到回答");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer: PaperAnswer | null = null;
+  const take = (block: string) => {
+    const parsed = parseSseBlocks(block);
+    buffer = parsed.rest;
+    for (const event of parsed.events) {
+      onEvent?.(event);
+      if (event.type === "answer") answer = event.answer;
+      if (event.type === "error") {
+        throw new HttpError(event.status || 500, event.message || "问答失败", {
+          code: event.code || "ask_failed",
+          stage: event.stage || "ask",
+          message: event.message || "问答失败",
+        });
+      }
+    }
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    take(buffer);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) take(`${buffer}\n\n`);
+  if (!answer) throw new Error("连接中断，未收到回答");
+  return answer;
 }
 
 export function searchLibrary(q: string, k?: number) {

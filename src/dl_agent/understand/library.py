@@ -13,6 +13,7 @@ from dl_agent.domain.models import AskTurn, LibraryHit, PaperAnswer
 from dl_agent.harness.complete import LlmRequestError
 from dl_agent.knowledge.service import KnowledgeService
 from dl_agent.understand.citations import sanitize_answer_zh
+from dl_agent.understand.progress import emit_phase
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ def ask_library(
     question = (question or "").strip()
     if not question:
         raise ValueError("问题不能为空")
+    emit_phase("library", "正在检索本地库")
     version = settings.library_prompt_version
     model = settings.model_name
     tools = LibraryTools(knowledge, default_limit=settings.library_paper_k)

@@ -1,7 +1,8 @@
 import logging
+from typing import NoReturn
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from dl_agent.api.deps import get_knowledge, get_translate, get_understand
 from dl_agent.api.errors import api_error, not_implemented
@@ -15,6 +16,7 @@ from dl_agent.knowledge.service import (
     PaperNotReadyError,
 )
 from dl_agent.translate.service import TranslateService
+from dl_agent.understand.progress import format_sse
 from dl_agent.understand.service import PaperNotReadyError as UnderstandNotReady
 from dl_agent.understand.service import UnderstandService
 
@@ -264,17 +266,52 @@ def ask_paper(
         if should_use_agent(understand.settings):
             return understand.ask_agent(paper_id, question, body.history)
         return understand.ask(paper_id, question, body.history)
-    except PaperNotFoundError:
+    except Exception as exc:
+        _raise_ask_http(exc)
+
+
+@router.post("/papers/{paper_id}/ask/stream")
+def ask_paper_stream(
+    paper_id: str,
+    body: AskRequest,
+    understand: UnderstandService = Depends(get_understand),
+):
+    question = (body.question or "").strip()
+    if not question:
+        raise api_error(400, "invalid_request", "ask", "问题不能为空")
+    agent = should_use_agent(understand.settings)
+    try:
+        understand.guard_ask(paper_id, question, agent=agent)
+    except Exception as exc:
+        _raise_ask_http(exc)
+
+    def generate():
+        for event in understand.iter_ask_events(paper_id, question, body.history, agent=agent):
+            yield format_sse(event)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _raise_ask_http(exc: Exception) -> NoReturn:
+    if isinstance(exc, PaperNotFoundError):
         raise api_error(404, "not_found", "ask", "论文不存在") from None
-    except (PaperNotReadyError, UnderstandNotReady):
+    if isinstance(exc, (PaperNotReadyError, UnderstandNotReady)):
         raise api_error(409, "not_ready", "ask", "论文尚未解析完成") from None
-    except IndexNotReadyError as exc:
+    if isinstance(exc, IndexNotReadyError):
         if exc.status == "pending":
             raise api_error(409, "index_pending", "ask", "索引尚未完成") from exc
         raise api_error(503, "index_failed", "ask", exc.error or "索引失败") from exc
-    except LlmNotConfiguredError as exc:
+    if isinstance(exc, LlmNotConfiguredError):
         raise api_error(503, "llm_not_configured", "ask", str(exc)) from exc
-    except LlmRequestError as exc:
+    if isinstance(exc, LlmRequestError):
         raise api_error(503, "llm_request_failed", "ask", str(exc)) from exc
-    except ValueError as exc:
+    if isinstance(exc, ValueError):
         raise api_error(400, "invalid_request", "ask", str(exc)) from exc
+    raise exc

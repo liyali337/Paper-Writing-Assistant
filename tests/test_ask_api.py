@@ -281,6 +281,80 @@ def test_ask_503_llm_not_configured(tmp_path: Path) -> None:
         app.dependency_overrides.clear()
 
 
+def _sse_events(body: str) -> list[dict]:
+    events = []
+    for block in body.split("\n\n"):
+        data = [
+            line.split(":", 1)[1].strip()
+            for line in block.splitlines()
+            if line.startswith("data:")
+        ]
+        if data:
+            events.append(json.loads("\n".join(data)))
+    return events
+
+
+def test_ask_stream_emits_tool_then_answer(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, ask_mode="agent")
+    knowledge = _knowledge(tmp_path, settings)
+    paper_id = _save_ready_paper(knowledge)
+    client = _client(knowledge, _understand(knowledge, settings))
+    try:
+        with client.stream(
+            "POST",
+            f"/papers/{paper_id}/ask/stream",
+            json={"question": "损失函数里的 lambda 怎么设？"},
+        ) as response:
+            assert response.status_code == 200, response.read()
+            assert "text/event-stream" in response.headers["content-type"]
+            body = "".join(response.iter_text())
+        events = _sse_events(body)
+        tools = [item for item in events if item["type"] == "tool"]
+        assert tools[0]["name"] == "search_child_chunks"
+        assert tools[0]["status"] == "start"
+        assert tools[0]["label"] == "检索文内片段"
+        assert any(item["status"] == "done" and item["call_id"] == tools[0]["call_id"] for item in tools)
+        assert "The total loss" not in json.dumps(tools, ensure_ascii=False)
+        assert any(item["type"] == "phase" and item["label"] == "正在理解问题" for item in events)
+        assert events[-1]["type"] == "answer"
+        assert events[-1]["answer"]["answer_zh"]
+        assert events[-1]["answer"]["paper_id"] == paper_id
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ask_stream_simple_has_phase_without_tools(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, ask_mode="simple")
+    knowledge = _knowledge(tmp_path, settings)
+    paper_id = _save_ready_paper(knowledge)
+    client = _client(knowledge, _understand(knowledge, settings))
+    try:
+        response = client.post(
+            f"/papers/{paper_id}/ask/stream",
+            json={"question": "损失函数里的 lambda 怎么设？"},
+        )
+        assert response.status_code == 200, response.text
+        events = _sse_events(response.text)
+        assert any(item["type"] == "phase" and item["label"] == "正在检索本篇" for item in events)
+        assert not any(item["type"] == "tool" for item in events)
+        assert events[-1]["type"] == "answer"
+        assert events[-1]["answer"]["prompt_version"] == "ask-v1"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ask_stream_404_stays_json(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    knowledge = _knowledge(tmp_path, settings)
+    client = _client(knowledge, _understand(knowledge, settings))
+    try:
+        response = client.post("/papers/missing/ask/stream", json={"question": "核心方法是什么？"})
+        assert response.status_code == 404
+        assert response.json()["detail"]["code"] == "not_found"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_ask_400_empty_question(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     knowledge = _knowledge(tmp_path, settings)
